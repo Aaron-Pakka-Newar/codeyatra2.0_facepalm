@@ -1175,6 +1175,15 @@ def main():
     
     running = True
     
+    # Initialize keyboard - pump events and clear queue to ensure controls work on first run
+    pygame.event.pump()
+    pygame.event.clear()
+    pygame.key.set_repeat(100, 50)  # Enable key repeat for smoother movement
+    
+    # Force initial display update to ensure window is ready
+    screen.fill((0, 0, 0))
+    pygame.display.flip()
+    
     print("=" * 60)
     print("Directional Tactile Navigation Device Simulation")
     print("3×3 Tactile Grid Model")
