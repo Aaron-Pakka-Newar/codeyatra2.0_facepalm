@@ -303,6 +303,24 @@ def compute_safe_direction(heights):
 # -----------------------
 # UPDATE OBSTACLES
 # -----------------------
+# Player collision radius in pixels
+PLAYER_RADIUS = 15  # ~0.15m
+
+def check_collision(px, py):
+    """Return True if position (px, py) collides with any obstacle."""
+    for obs in obstacles:
+        hw_px = obs["cube_w"] * SCALE  # half-width in pixels
+        hd_px = obs["cube_d"] * SCALE  # half-depth in pixels
+        # Expand obstacle bounds by player radius for circle-vs-AABB collision
+        if (obs["x"] - hw_px - PLAYER_RADIUS < px < obs["x"] + hw_px + PLAYER_RADIUS and
+            obs["y"] - hd_px - PLAYER_RADIUS < py < obs["y"] + hd_px + PLAYER_RADIUS):
+            # Only block on non-pothole, non-step obstacles (step = can step over)
+            elev = obs["elevation"]
+            if elev in ("mid", "top"):  # solid obstacles block movement
+                return True
+    return False
+
+
 def update_obstacles():
     for obs in obstacles:
         if obs["moving"]:
@@ -1190,17 +1208,19 @@ def main():
         # Input handling
         pressed = pygame.key.get_pressed()
         
-        # WASD and Arrow keys
+        # WASD and Arrow keys (with collision detection)
         if pressed[pygame.K_w] or pressed[pygame.K_UP]:
             new_x = player_x + math.cos(player_angle) * speed
             new_y = player_y + math.sin(player_angle) * speed
-            if 50 < new_x < WORLD_SIZE - 50 and 50 < new_y < WORLD_SIZE - 50:
+            if (50 < new_x < WORLD_SIZE - 50 and 50 < new_y < WORLD_SIZE - 50
+                    and not check_collision(new_x, new_y)):
                 player_x = new_x
                 player_y = new_y
         if pressed[pygame.K_s] or pressed[pygame.K_DOWN]:
             new_x = player_x - math.cos(player_angle) * speed
             new_y = player_y - math.sin(player_angle) * speed
-            if 50 < new_x < WORLD_SIZE - 50 and 50 < new_y < WORLD_SIZE - 50:
+            if (50 < new_x < WORLD_SIZE - 50 and 50 < new_y < WORLD_SIZE - 50
+                    and not check_collision(new_x, new_y)):
                 player_x = new_x
                 player_y = new_y
         if pressed[pygame.K_a] or pressed[pygame.K_LEFT]:
