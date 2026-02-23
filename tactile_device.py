@@ -32,6 +32,7 @@ MAX_RANGE = 3.0  # meters (scaled to pixels: 100px = 1m)
 SCALE = 100  # pixels per meter
 VIEW_SCALE = 0.55  # Scale factor to fit the full 3m circle in the viewport
 FOV = math.radians(120)  # 120° field of view
+CAMERA_HEIGHT = 1.6  # Camera/eye height in meters
 
 # Distance layers (rows)
 DISTANCE_LAYERS = {
@@ -106,11 +107,23 @@ def generate_obstacles():
         vx = random.uniform(-0.8, 0.8) if is_moving else 0
         vy = random.uniform(-0.8, 0.8) if is_moving else 0
         
+        # Random cuboid dimensions (in meters)
+        height_ranges = {
+            "step": (0.2, 0.5),
+            "mid": (0.6, 1.2),
+            "top": (1.5, 2.0),
+            "pothole": (0.15, 0.4)
+        }
+        hmin, hmax = height_ranges.get(elev, (0.3, 0.5))
+        
         obstacles.append({
             "x": x, "y": y,
             "elevation": elev,
             "moving": is_moving,
-            "vx": vx, "vy": vy
+            "vx": vx, "vy": vy,
+            "cube_w": random.uniform(0.15, 0.55),  # half-width in meters
+            "cube_d": random.uniform(0.15, 0.55),  # half-depth in meters
+            "cube_h": random.uniform(hmin, hmax)    # height in meters
         })
 
 generate_obstacles()
@@ -461,6 +474,265 @@ def draw_3d_obstacle(sx, sy, elevation, size):
     
     # Edges
     pygame.draw.rect(screen, (255, 255, 255), (sx - cube_w//2, sy - cube_h, cube_w, cube_h), 1)
+
+# -----------------------
+# FIRST-PERSON PERSPECTIVE VIEW (Blind Navigation)
+# -----------------------
+def draw_first_person_view():
+    """Draw first-person 3D perspective view showing ground plane with cuboid obstacles"""
+    
+    horizon_y = int(HEIGHT * 0.42)
+    focal = (SCENE_W / 2) / math.tan(FOV / 2)
+    
+    def project(x, y, z):
+        """Project 3D point to screen. x=right, y=up, z=forward in meters."""
+        if z <= 0.05:
+            return None
+        sx = SCENE_W / 2 + (x / z) * focal
+        sy = horizon_y - ((y - CAMERA_HEIGHT) / z) * focal
+        return (sx, sy)
+    
+    def apply_fade(col, f):
+        return tuple(max(0, min(255, int(comp * f))) for comp in col)
+    
+    # --- Sky ---
+    pygame.draw.rect(screen, (12, 15, 35), (0, 0, SCENE_W, horizon_y))
+    # Horizon glow
+    for i in range(40):
+        y = horizon_y - i
+        if y >= 0:
+            a = int(40 - i)
+            pygame.draw.line(screen, (12 + a // 2, 18 + a // 2, 40 + a), (0, y), (SCENE_W, y))
+    
+    # --- Ground ---
+    pygame.draw.rect(screen, (25, 35, 25), (0, horizon_y, SCENE_W, HEIGHT - horizon_y))
+    # Slight gradient near bottom
+    for i in range(25):
+        y = HEIGHT - i
+        if y > horizon_y:
+            c = 30 + i
+            pygame.draw.line(screen, (c - 8, c + 3, c - 8), (0, y), (SCENE_W, y))
+    
+    # --- Horizon line ---
+    pygame.draw.line(screen, (60, 70, 90), (0, horizon_y), (SCENE_W, horizon_y), 2)
+    
+    # --- Ground grid lines for depth perception ---
+    for d in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0]:
+        gy = horizon_y + (CAMERA_HEIGHT / d) * focal
+        if horizon_y < gy < HEIGHT:
+            intensity = max(18, int(50 - d * 4))
+            pygame.draw.line(screen, (intensity, intensity + 6, intensity),
+                             (0, int(gy)), (SCENE_W, int(gy)), 1)
+    
+    # Vertical perspective grid lines
+    for lateral in [-3, -2, -1, 0, 1, 2, 3]:
+        pts = []
+        for d in [0.8, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0]:
+            p = project(lateral, 0, d)
+            if p and 0 <= p[0] <= SCENE_W and horizon_y <= p[1] <= HEIGHT:
+                pts.append((int(p[0]), int(p[1])))
+        if len(pts) >= 2:
+            pygame.draw.lines(screen, (30, 38, 30), False, pts, 1)
+    
+    # --- Distance zone markers (1m, 2m, 3m) ---
+    zone_colors = [(200, 80, 80), (200, 200, 80), (100, 200, 100)]
+    zone_labels = ["1m - IMMEDIATE", "2m - NEAR", "3m - FAR"]
+    for i, d in enumerate([1.0, 2.0, 3.0]):
+        gy = horizon_y + (CAMERA_HEIGHT / d) * focal
+        if horizon_y < gy < HEIGHT:
+            pygame.draw.line(screen, zone_colors[i], (0, int(gy)), (SCENE_W, int(gy)), 2)
+            label = small_font.render(zone_labels[i], True, zone_colors[i])
+            screen.blit(label, (SCENE_W - label.get_width() - 10, int(gy) - 18))
+    
+    # --- Direction zone dividers (-20 deg and +20 deg) ---
+    for angle_off_deg in [-20, 20]:
+        tan_a = math.tan(math.radians(angle_off_deg))
+        sx = SCENE_W / 2 + tan_a * focal
+        if 0 <= sx <= SCENE_W:
+            pygame.draw.line(screen, (60, 60, 100), (int(sx), horizon_y), (int(sx), HEIGHT), 1)
+    
+    # Direction zone labels
+    for label_text, angle_deg in [("LEFT", -40), ("CENTER", 0), ("RIGHT", 40)]:
+        tan_a = math.tan(math.radians(angle_deg))
+        sx = SCENE_W / 2 + tan_a * focal
+        lbl = small_font.render(label_text, True, (90, 90, 130))
+        screen.blit(lbl, (int(sx) - lbl.get_width() // 2, horizon_y + 8))
+    
+    # --- Collect visible obstacles ---
+    cos_a = math.cos(player_angle)
+    sin_a = math.sin(player_angle)
+    
+    visible = []
+    for obs in obstacles:
+        dx = obs["x"] - player_x
+        dy = obs["y"] - player_y
+        
+        # Transform to camera space
+        forward = dx * cos_a + dy * sin_a       # along player facing
+        right = -dx * sin_a + dy * cos_a        # perpendicular (+ is right)
+        
+        forward_m = forward / SCALE
+        right_m = right / SCALE
+        
+        if forward_m < 0.15:
+            continue
+        if forward_m > MAX_RANGE + 2:
+            continue
+        
+        hw = obs.get("cube_w", 0.3)
+        ang = math.atan2(abs(right_m), forward_m)
+        margin = math.atan2(hw, forward_m) if forward_m > 0.1 else 0
+        if ang > FOV / 2 + margin:
+            continue
+        
+        visible.append({
+            "obs": obs,
+            "forward_m": forward_m,
+            "right_m": right_m,
+        })
+    
+    # Sort far-to-near (painter's algorithm)
+    visible.sort(key=lambda v: -v["forward_m"])
+    
+    # --- Draw obstacles as 3D cuboids ---
+    for v in visible:
+        obs = v["obs"]
+        fm = v["forward_m"]
+        rm = v["right_m"]
+        
+        elev = obs["elevation"]
+        elev_info = ELEVATION_TYPES[elev]
+        color = elev_info["color"]
+        
+        hw = obs.get("cube_w", 0.3)
+        hd = obs.get("cube_d", 0.3)
+        ch = obs.get("cube_h", 0.5)
+        is_pothole = elev_info["height"] < 0
+        
+        # Distance fade
+        fade = max(0.35, 1.0 - (fm / (MAX_RANGE + 1)) * 0.5)
+        
+        if is_pothole:
+            # Draw pothole as a dark depression on the ground plane
+            corners = [
+                project(rm - hw, 0, fm - hd),
+                project(rm + hw, 0, fm - hd),
+                project(rm + hw, 0, fm + hd),
+                project(rm - hw, 0, fm + hd),
+            ]
+            if all(c is not None for c in corners):
+                pygame.draw.polygon(screen, apply_fade((40, 20, 60), fade), corners)
+                pygame.draw.polygon(screen, apply_fade(color, fade), corners, 2)
+                # Depth lines inward
+                inner = [
+                    project(rm - hw * 0.5, -ch, fm - hd * 0.5),
+                    project(rm + hw * 0.5, -ch, fm - hd * 0.5),
+                    project(rm + hw * 0.5, -ch, fm + hd * 0.5),
+                    project(rm - hw * 0.5, -ch, fm + hd * 0.5),
+                ]
+                if all(c is not None for c in inner):
+                    pygame.draw.polygon(screen, apply_fade((20, 10, 30), fade), inner)
+                    for j in range(4):
+                        pygame.draw.line(screen, apply_fade((60, 30, 80), fade),
+                                         corners[j], inner[j], 1)
+        else:
+            # --- Draw cuboid ---
+            # 8 corners: ground (y=0) and top (y=ch)
+            gfl = project(rm - hw, 0, fm - hd)
+            gfr = project(rm + hw, 0, fm - hd)
+            gbr = project(rm + hw, 0, fm + hd)
+            gbl = project(rm - hw, 0, fm + hd)
+            tfl = project(rm - hw, ch, fm - hd)
+            tfr = project(rm + hw, ch, fm - hd)
+            tbr = project(rm + hw, ch, fm + hd)
+            tbl = project(rm - hw, ch, fm + hd)
+            
+            all_corners = [gfl, gfr, gbr, gbl, tfl, tfr, tbr, tbl]
+            if any(c is None for c in all_corners):
+                continue
+            
+            front_color = apply_fade(color, fade)
+            dark_color = apply_fade(tuple(max(0, c - 60) for c in color), fade)
+            light_color = apply_fade(tuple(min(255, c + 40) for c in color), fade)
+            edge_color = apply_fade((200, 200, 200), fade)
+            
+            # Side face (draw first so front overlaps it)
+            if rm > 0.02:  # Obstacle to our right → we see its LEFT face
+                face = [gfl, gbl, tbl, tfl]
+                pygame.draw.polygon(screen, dark_color, face)
+                pygame.draw.polygon(screen, edge_color, face, 1)
+            elif rm < -0.02:  # Obstacle to our left → we see its RIGHT face
+                face = [gfr, gbr, tbr, tfr]
+                pygame.draw.polygon(screen, dark_color, face)
+                pygame.draw.polygon(screen, edge_color, face, 1)
+            
+            # Front face
+            front = [gfl, gfr, tfr, tfl]
+            pygame.draw.polygon(screen, front_color, front)
+            pygame.draw.polygon(screen, edge_color, front, 1)
+            
+            # Top face (visible when cuboid is shorter than camera height)
+            if ch < CAMERA_HEIGHT:
+                top = [tfl, tfr, tbr, tbl]
+                pygame.draw.polygon(screen, light_color, top)
+                pygame.draw.polygon(screen, edge_color, top, 1)
+            
+            # Proximity warning glow for immediate zone (< 1m)
+            if fm < 1.0:
+                pulse = (math.sin(time.time() * 6) + 1) / 2
+                glow_r = int(255 * pulse)
+                glow_g = int(50 * pulse)
+                pygame.draw.polygon(screen, (glow_r, glow_g, glow_g), front, 3)
+            
+            # Moving indicator
+            if obs.get("moving"):
+                pulse = (math.sin(time.time() * 8) + 1) / 2
+                mov_color = (255, int(255 * pulse), 50)
+                pygame.draw.polygon(screen, mov_color, front, 2)
+    
+    # --- Title ---
+    title = title_font.render("Player View (Blind Navigation)", True, (200, 200, 200))
+    title_box_h = 45
+    pygame.draw.rect(screen, (30, 30, 50), (0, 5, SCENE_W, title_box_h))
+    pygame.draw.rect(screen, (100, 200, 255), (0, 5, SCENE_W, title_box_h), 2)
+    screen.blit(title, (SCENE_W // 2 - title.get_width() // 2, 12))
+    
+    # --- Facing direction ---
+    angle_deg = math.degrees(player_angle) % 360
+    cardinals = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
+    cardinal_idx = int(((angle_deg + 22.5) % 360) / 45)
+    cardinal = cardinals[cardinal_idx]
+    angle_str = f"Facing: {angle_deg:.0f}\u00b0 ({cardinal})"
+    angle_text = label_font.render(angle_str, True, (200, 255, 200))
+    angle_box_w = angle_text.get_width() + 30
+    angle_box_h = 40
+    angle_box_x = SCENE_W // 2 - angle_box_w // 2
+    angle_box_y = HEIGHT - 90
+    pygame.draw.rect(screen, (20, 40, 30), (angle_box_x, angle_box_y, angle_box_w, angle_box_h))
+    pygame.draw.rect(screen, (100, 255, 100), (angle_box_x, angle_box_y, angle_box_w, angle_box_h), 2)
+    screen.blit(angle_text, (angle_box_x + 15, angle_box_y + 8))
+    
+    # --- Legend ---
+    y_off = 60
+    legend_bg_h = 130
+    pygame.draw.rect(screen, (20, 20, 30), (10, y_off - 5, 180, legend_bg_h))
+    pygame.draw.rect(screen, (80, 120, 160), (10, y_off - 5, 180, legend_bg_h), 2)
+    legend_title = label_font.render("Obstacles:", True, (100, 200, 255))
+    screen.blit(legend_title, (20, y_off))
+    y_off += 30
+    for name, einfo in ELEVATION_TYPES.items():
+        if name != "ground":
+            pygame.draw.rect(screen, einfo["color"], (25, y_off, 14, 14))
+            lbl = small_font.render(einfo["label"], True, (200, 200, 200))
+            screen.blit(lbl, (48, y_off - 2))
+            y_off += 25
+    
+    # --- Controls ---
+    ctrl_y = HEIGHT - 45
+    pygame.draw.rect(screen, (20, 20, 30), (10, ctrl_y - 5, SCENE_W - 20, 40))
+    pygame.draw.rect(screen, (100, 150, 200), (10, ctrl_y - 5, SCENE_W - 20, 40), 1)
+    ctrl = info_font.render("A/D: Rotate | W/S: Move | R: Reset | ESC: Quit", True, (150, 200, 255))
+    screen.blit(ctrl, (20, ctrl_y))
 
 # -----------------------
 # 3D ISOMETRIC TACTILE GRID
@@ -816,7 +1088,7 @@ def main():
         
         # Draw
         screen.fill((0, 0, 0))
-        draw_scene()
+        draw_first_person_view()
         draw_tactile_device(heights, vibration, cell_obstacles)
         
         pygame.display.flip()
