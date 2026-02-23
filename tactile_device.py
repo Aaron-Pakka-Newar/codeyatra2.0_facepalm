@@ -88,7 +88,8 @@ DIRECTION_LAYERS = {
 # Elevation categories
 ELEVATION_TYPES = {
     "ground": {"height": 0, "color": (60, 60, 60), "label": "Ground"},
-    "pothole": {"height": -1, "color": (80, 40, 120), "label": "Pothole"},
+    "shallow_pothole": {"height": -1, "color": (140, 90, 200), "label": "Shallow Pit"},
+    "cliff_pothole": {"height": -3, "color": (180, 30, 30), "label": "Cliff (Danger)"},
     "step": {"height": 1, "color": (100, 200, 100), "label": "Step"},
     "mid": {"height": 2, "color": (220, 180, 60), "label": "Mid"},
     "top": {"height": 3, "color": (255, 80, 80), "label": "Top/Head"}
@@ -98,7 +99,12 @@ ELEVATION_TYPES = {
 # WORLD SETTINGS
 # -----------------------
 WORLD_SIZE = 1000  # pixels (10m x 10m world)
-NUM_OBSTACLES = 20
+NUM_OBSTACLES = 14  # Reduced for more walking room
+MIN_OBSTACLE_SPACING = 60  # Minimum pixels between obstacle centres
+WALL_BOUNDARY = 50         # Wall outer edge in pixels
+WALL_THICKNESS_PX = 30     # Wall thickness in pixels
+WALL_INNER = WALL_BOUNDARY + WALL_THICKNESS_PX  # Inner edge of walls
+WALL_HEIGHT_M = 3.5        # Wall height in metres (taller than top/red obstacles)
 
 player_x = WORLD_SIZE // 2
 player_y = WORLD_SIZE // 2
@@ -106,6 +112,17 @@ player_angle = -math.pi / 2  # Facing up initially (0° = right, -90° = up)
 
 speed = 5
 rot_speed = 0.06
+
+# Player vertical state (for pothole falling & jumping)
+player_y_offset = 0.0       # Current camera Y offset in meters (negative = below ground)
+player_y_target = 0.0       # Target Y offset (smoothly interpolated)
+player_in_pothole = False   # Whether player is currently in a shallow pothole
+player_jumping = False      # Whether player is currently in a jump
+player_jump_velocity = 0.0  # Current jump vertical velocity
+JUMP_STRENGTH = 4.0         # Initial upward velocity (m/s)
+GRAVITY = 12.0              # Gravity acceleration (m/s²)
+FALL_SPEED = 3.0            # Speed of falling into pothole (m/s)
+POTHOLE_DEPTH = -0.8        # How deep the camera drops in a shallow pothole (meters)
 
 # Obstacle structure
 obstacles = []
@@ -123,33 +140,47 @@ timestep = 0
 def generate_obstacles():
     global obstacles
     obstacles = []
-    elevation_choices = ["step", "mid", "top", "pothole"]
-    weights = [0.3, 0.35, 0.2, 0.15]
+    elevation_choices = ["step", "mid", "top", "shallow_pothole", "cliff_pothole"]
+    weights = [0.25, 0.3, 0.15, 0.15, 0.15]
     
     # Generate obstacles in a ring around the player (within detectable range)
     for _ in range(NUM_OBSTACLES):
-        # Random distance between 0.5m and 4m (some outside range)
-        dist = random.uniform(50, 400)  # 0.5m to 4m in pixels
-        angle = random.uniform(0, 2 * math.pi)
-        
-        x = player_x + dist * math.cos(angle)
-        y = player_y + dist * math.sin(angle)
-        
-        # Keep within world bounds
-        x = max(50, min(WORLD_SIZE - 50, x))
-        y = max(50, min(WORLD_SIZE - 50, y))
+        # Try several times to find a non-overlapping position
+        for _attempt in range(30):
+            # Random distance between 0.8m and 4m (some outside range)
+            dist = random.uniform(80, 400)  # 0.8m to 4m in pixels
+            ang = random.uniform(0, 2 * math.pi)
+            
+            x = player_x + dist * math.cos(ang)
+            y = player_y + dist * math.sin(ang)
+            
+            # Keep within world bounds (with wall margin)
+            x = max(80, min(WORLD_SIZE - 80, x))
+            y = max(80, min(WORLD_SIZE - 80, y))
+            
+            # Check spacing against already-placed obstacles
+            too_close = False
+            for existing in obstacles:
+                if math.hypot(x - existing["x"], y - existing["y"]) < MIN_OBSTACLE_SPACING:
+                    too_close = True
+                    break
+            if not too_close:
+                break
         
         elev = random.choices(elevation_choices, weights)[0]
-        is_moving = random.random() < 0.15  # 15% chance of moving
-        vx = random.uniform(-0.8, 0.8) if is_moving else 0
-        vy = random.uniform(-0.8, 0.8) if is_moving else 0
+        # Potholes are always static
+        is_pothole = elev in ("shallow_pothole", "cliff_pothole")
+        is_moving = False if is_pothole else (random.random() < 0.25)
+        vx = random.uniform(-3.5, 3.5) if is_moving else 0
+        vy = random.uniform(-3.5, 3.5) if is_moving else 0
         
         # Random cuboid dimensions (in meters)
         height_ranges = {
             "step": (0.2, 0.5),
             "mid": (0.6, 1.2),
             "top": (1.5, 2.0),
-            "pothole": (0.15, 0.4)
+            "shallow_pothole": (0.15, 0.4),
+            "cliff_pothole": (0.8, 1.5)
         }
         hmin, hmax = height_ranges.get(elev, (0.3, 0.5))
         
@@ -307,18 +338,82 @@ def compute_safe_direction(heights):
 PLAYER_RADIUS = 15  # ~0.15m
 
 def check_collision(px, py):
-    """Return True if position (px, py) collides with any obstacle."""
+    """Return True if position (px, py) collides with any obstacle or wall."""
+    # --- Wall collision ---
+    if (px <= WALL_INNER or px >= WORLD_SIZE - WALL_INNER or
+        py <= WALL_INNER or py >= WORLD_SIZE - WALL_INNER):
+        return True
+    # --- Obstacle collision ---
     for obs in obstacles:
         hw_px = obs["cube_w"] * SCALE  # half-width in pixels
         hd_px = obs["cube_d"] * SCALE  # half-depth in pixels
         # Expand obstacle bounds by player radius for circle-vs-AABB collision
         if (obs["x"] - hw_px - PLAYER_RADIUS < px < obs["x"] + hw_px + PLAYER_RADIUS and
             obs["y"] - hd_px - PLAYER_RADIUS < py < obs["y"] + hd_px + PLAYER_RADIUS):
-            # Only block on non-pothole, non-step obstacles (step = can step over)
             elev = obs["elevation"]
-            if elev in ("mid", "top"):  # solid obstacles block movement
+            # Cliff potholes ALWAYS block movement
+            if elev == "cliff_pothole":
                 return True
+            # Mid and top obstacles block (unless jumping over step)
+            if elev in ("mid", "top"):
+                return True
+            # Step obstacles block UNLESS player is jumping
+            if elev == "step" and not player_jumping:
+                return True
+            # shallow_pothole: never blocks, player falls in
     return False
+
+
+def get_pothole_at_player():
+    """Check if player is standing inside a shallow pothole. Returns the obstacle or None."""
+    for obs in obstacles:
+        if obs["elevation"] != "shallow_pothole":
+            continue
+        hw_px = obs["cube_w"] * SCALE
+        hd_px = obs["cube_d"] * SCALE
+        if (obs["x"] - hw_px - PLAYER_RADIUS < player_x < obs["x"] + hw_px + PLAYER_RADIUS and
+            obs["y"] - hd_px - PLAYER_RADIUS < player_y < obs["y"] + hd_px + PLAYER_RADIUS):
+            return obs
+    return None
+
+
+def update_player_vertical(dt):
+    """Update player vertical position (pothole falling / jumping)."""
+    global player_y_offset, player_y_target, player_in_pothole
+    global player_jumping, player_jump_velocity
+
+    # --- Jumping logic ---
+    if player_jumping:
+        player_jump_velocity -= GRAVITY * dt
+        player_y_offset += player_jump_velocity * dt
+        # Landed
+        if player_y_offset <= 0.0 and player_jump_velocity < 0:
+            player_y_offset = 0.0
+            player_jumping = False
+            player_jump_velocity = 0.0
+            player_in_pothole = False  # Jump fully exits any pothole
+        return  # Skip pothole logic while airborne
+
+    # --- Pothole falling logic ---
+    pothole = get_pothole_at_player()
+    if pothole is not None and not player_in_pothole:
+        # Just entered a shallow pothole - start falling
+        player_in_pothole = True
+        player_y_target = POTHOLE_DEPTH
+    elif pothole is None and player_in_pothole and not player_jumping:
+        # Walked out without jumping (shouldn't normally happen since
+        # we require jump, but handle gracefully)
+        player_in_pothole = False
+        player_y_target = 0.0
+
+    # Smooth interpolation toward target
+    if player_in_pothole:
+        player_y_target = POTHOLE_DEPTH
+    diff = player_y_target - player_y_offset
+    if abs(diff) > 0.005:
+        player_y_offset += diff * min(1.0, FALL_SPEED * dt * 5)
+    else:
+        player_y_offset = player_y_target
 
 
 def update_obstacles():
@@ -391,6 +486,30 @@ def draw_scene():
     # Draw outer boundary circle (slightly beyond 3m) for visual clarity
     outer_radius = int(MAX_RANGE * SCALE * VIEW_SCALE) + scale_px(8)
     pygame.draw.circle(screen, (50, 50, 65), center, outer_radius, scale_px(1))
+    
+    # Draw thick white boundary walls in top-down view
+    wall_corners = [
+        (WALL_BOUNDARY, WALL_BOUNDARY),
+        (WORLD_SIZE - WALL_BOUNDARY, WALL_BOUNDARY),
+        (WORLD_SIZE - WALL_BOUNDARY, WORLD_SIZE - WALL_BOUNDARY),
+        (WALL_BOUNDARY, WORLD_SIZE - WALL_BOUNDARY),
+    ]
+    inner_corners = [
+        (WALL_INNER, WALL_INNER),
+        (WORLD_SIZE - WALL_INNER, WALL_INNER),
+        (WORLD_SIZE - WALL_INNER, WORLD_SIZE - WALL_INNER),
+        (WALL_INNER, WORLD_SIZE - WALL_INNER),
+    ]
+    for i in range(4):
+        j = (i + 1) % 4
+        o1 = world_to_screen(*wall_corners[i])
+        o2 = world_to_screen(*wall_corners[j])
+        i1 = world_to_screen(*inner_corners[i])
+        i2 = world_to_screen(*inner_corners[j])
+        pts = [(int(o1[0]), int(o1[1])), (int(o2[0]), int(o2[1])),
+               (int(i2[0]), int(i2[1])), (int(i1[0]), int(i1[1]))]
+        pygame.draw.polygon(screen, (200, 200, 200), pts)
+        pygame.draw.polygon(screen, (160, 160, 160), pts, 1)
     
     # Draw obstacles
     for obs in obstacles:
@@ -483,7 +602,7 @@ def draw_scene():
     pygame.draw.rect(screen, (20, 20, 30), (scale_px(10), ctrl_y - scale_px(5), SCENE_W - scale_px(20), ctrl_bg_height))
     pygame.draw.rect(screen, (100, 150, 200), (scale_px(10), ctrl_y - scale_px(5), SCENE_W - scale_px(20), ctrl_bg_height), scale_px(1))
     
-    ctrl = info_font.render("A/D: Rotate | W/S: Move | R: Reset | ESC: Quit", True, (150, 200, 255))
+    ctrl = info_font.render("A/D: Rotate | W/S: Move | SPACE: Jump | R: Reset | ESC: Quit", True, (150, 200, 255))
     screen.blit(ctrl, (scale_px(20), ctrl_y))
 
 def draw_3d_obstacle(sx, sy, elevation, size):
@@ -497,9 +616,13 @@ def draw_3d_obstacle(sx, sy, elevation, size):
     cube_h = height * (15 * SCALE_FACTOR) + scale_px(10)
     iso_offset = scale_px(8)  # Isometric offset
     
-    if elev_info["height"] < 0:  # Pothole - draw as depression
-        pygame.draw.ellipse(screen, (40, 20, 60), (sx - cube_w, sy - cube_w//2, cube_w*2, cube_w))
-        pygame.draw.ellipse(screen, color, (sx - cube_w, sy - cube_w//2, cube_w*2, cube_w), 2)
+    if elev_info["height"] < 0:  # Pothole - flat coloured ellipse (no depth)
+        if elevation == "cliff_pothole":
+            pygame.draw.ellipse(screen, (180, 30, 30), (sx - cube_w, sy - cube_w//2, cube_w*2, cube_w))
+            pygame.draw.ellipse(screen, (220, 50, 50), (sx - cube_w, sy - cube_w//2, cube_w*2, cube_w), 2)
+        else:
+            pygame.draw.ellipse(screen, (140, 90, 200), (sx - cube_w, sy - cube_w//2, cube_w*2, cube_w))
+            pygame.draw.ellipse(screen, (170, 120, 230), (sx - cube_w, sy - cube_w//2, cube_w*2, cube_w), 2)
         return
     
     # Bottom face (shadow)
@@ -544,6 +667,10 @@ def draw_first_person_view():
     screen.set_clip(pygame.Rect(0, 0, SCENE_W, HEIGHT))
     
     horizon_y = int(HEIGHT * 0.42)
+    # Shift horizon based on player vertical offset (falling into pothole / jumping)
+    effective_camera_height = CAMERA_HEIGHT + player_y_offset
+    horizon_shift = int(player_y_offset * 120 * SCALE_FACTOR)  # Positive = up, negative = down
+    horizon_y = horizon_y - horizon_shift
     focal = (SCENE_W / 2) / math.tan(FOV / 2)
     
     def project(x, y, z):
@@ -551,7 +678,7 @@ def draw_first_person_view():
         if z <= 0.05:
             return None
         sx = SCENE_W / 2 + (x / z) * focal
-        sy = horizon_y - ((y - CAMERA_HEIGHT) / z) * focal
+        sy = horizon_y - ((y - effective_camera_height) / z) * focal
         return (sx, sy)
     
     def apply_fade(col, f):
@@ -559,21 +686,15 @@ def draw_first_person_view():
     
     # --- Sky ---
     pygame.draw.rect(screen, (12, 15, 35), (0, 0, SCENE_W, horizon_y))
-    # Horizon glow
-    for i in range(40):
+    # Horizon glow (optimized: fewer lines, step by 3)
+    for i in range(0, 30, 3):
         y = horizon_y - i
         if y >= 0:
-            a = int(40 - i)
+            a = int(30 - i)
             pygame.draw.line(screen, (12 + a // 2, 18 + a // 2, 40 + a), (0, y), (SCENE_W, y))
     
     # --- Ground ---
     pygame.draw.rect(screen, (25, 35, 25), (0, horizon_y, SCENE_W, HEIGHT - horizon_y))
-    # Slight gradient near bottom
-    for i in range(25):
-        y = HEIGHT - i
-        if y > horizon_y:
-            c = 30 + i
-            pygame.draw.line(screen, (c - 8, c + 3, c - 8), (0, y), (SCENE_W, y))
     
     # --- Horizon line ---
     pygame.draw.line(screen, (60, 70, 90), (0, horizon_y), (SCENE_W, horizon_y), 2)
@@ -620,9 +741,104 @@ def draw_first_person_view():
         lbl = small_font.render(label_text, True, (90, 90, 130))
         screen.blit(lbl, (int(sx) - lbl.get_width() // 2, horizon_y + 8))
     
-    # --- Collect visible obstacles ---
+    # --- White boundary walls (4 thick walls of the world) ---
+    WALL_THICK_M = WALL_THICKNESS_PX / SCALE  # Thickness in metres
     cos_a = math.cos(player_angle)
     sin_a = math.sin(player_angle)
+    
+    def world_to_camera(wx_px, wy_px):
+        """Convert world pixel coords to camera-space (right, forward) in metres."""
+        dx = wx_px - player_x
+        dy = wy_px - player_y
+        fwd = (dx * cos_a + dy * sin_a) / SCALE
+        rgt = (-dx * sin_a + dy * cos_a) / SCALE
+        return rgt, fwd
+    
+    # Outer and inner corners of wall boundary
+    wo = WALL_BOUNDARY           # outer edge px
+    wi = WALL_INNER              # inner edge px
+    wmax_o = WORLD_SIZE - wo
+    wmax_i = WORLD_SIZE - wi
+    
+    # Each wall is a quad: 4 corners (outer_start, outer_end, inner_end, inner_start)
+    # We draw outer face, inner face, and top face for thickness
+    wall_quads = [
+        # Top wall  (y = small)
+        [(wo, wo), (wmax_o, wo), (wmax_i, wi), (wi, wi)],
+        # Right wall (x = large)
+        [(wmax_o, wo), (wmax_o, wmax_o), (wmax_i, wmax_i), (wmax_i, wi)],
+        # Bottom wall (y = large)
+        [(wmax_o, wmax_o), (wo, wmax_o), (wi, wmax_i), (wmax_i, wmax_i)],
+        # Left wall (x = small)
+        [(wo, wmax_o), (wo, wo), (wi, wi), (wi, wmax_i)],
+    ]
+    
+    wall_color_front = (220, 220, 220)
+    wall_color_side = (190, 190, 190)
+    wall_color_top = (245, 245, 245)
+    wall_edge = (160, 160, 160)
+    
+    # Collect wall faces with depth for painter's sort
+    wall_faces = []
+    
+    for quad in wall_quads:
+        # Outer face (quad[0] -> quad[1]), Inner face (quad[2] -> quad[3])
+        outer_pairs = [(quad[0], quad[1]), (quad[3], quad[2])]  # outer edge, inner edge
+        
+        for idx, (p1_px, p2_px) in enumerate(outer_pairs):
+            r1, f1 = world_to_camera(p1_px[0], p1_px[1])
+            r2, f2 = world_to_camera(p2_px[0], p2_px[1])
+            
+            if f1 <= 0.1 and f2 <= 0.1:
+                continue
+            
+            # Clip to near plane
+            if f1 <= 0.1:
+                t_val = (0.15 - f1) / (f2 - f1) if f2 != f1 else 0
+                r1 = r1 + t_val * (r2 - r1)
+                f1 = 0.15
+            elif f2 <= 0.1:
+                t_val = (0.15 - f2) / (f1 - f2) if f1 != f2 else 0
+                r2 = r2 + t_val * (r1 - r2)
+                f2 = 0.15
+            
+            bl = project(r1, 0, f1)
+            br = project(r2, 0, f2)
+            tl = project(r1, WALL_HEIGHT_M, f1)
+            tr = project(r2, WALL_HEIGHT_M, f2)
+            
+            if bl and br and tl and tr:
+                avg_dist = (f1 + f2) / 2
+                fc = wall_color_front if idx == 0 else wall_color_side
+                wall_faces.append((avg_dist, [bl, br, tr, tl], fc))
+        
+        # Top face (connects outer top edge to inner top edge)
+        corners_px = [quad[0], quad[1], quad[2], quad[3]]
+        cam_pts = [world_to_camera(p[0], p[1]) for p in corners_px]
+        
+        # Check if any point is in front
+        if any(f > 0.1 for _, f in cam_pts):
+            top_projs = []
+            for r, f in cam_pts:
+                if f <= 0.1:
+                    f = 0.15
+                p = project(r, WALL_HEIGHT_M, f)
+                if p:
+                    top_projs.append(p)
+            if len(top_projs) >= 3:
+                avg_d = sum(max(0.15, f) for _, f in cam_pts) / 4
+                wall_faces.append((avg_d, top_projs, wall_color_top))
+    
+    # Sort far-to-near and draw
+    wall_faces.sort(key=lambda x: -x[0])
+    for _, pts, col in wall_faces:
+        fade = max(0.25, 1.0 - _ / 14.0)
+        fc = tuple(max(0, min(255, int(c * fade))) for c in col)
+        ec = tuple(max(0, min(255, int(c * fade))) for c in wall_edge)
+        pygame.draw.polygon(screen, fc, pts)
+        pygame.draw.polygon(screen, ec, pts, 1)
+    
+    # --- Collect visible obstacles ---
     
     visible = []
     for obs in obstacles:
@@ -675,7 +891,15 @@ def draw_first_person_view():
         fade = max(0.35, 1.0 - (fm / (MAX_RANGE + 1)) * 0.5)
         
         if is_pothole:
-            # Draw pothole as a dark depression on the ground plane
+            is_cliff = (elev == "cliff_pothole")
+            if is_cliff:
+                fill_color = (180, 30, 30)   # Solid red
+                border_color = (220, 50, 50)
+            else:
+                fill_color = (140, 90, 200)  # Solid purple
+                border_color = (170, 120, 230)
+            
+            # Draw pothole as a flat coloured patch on the ground (no depth)
             corners = [
                 project(rm - hw, 0, fm - hd),
                 project(rm + hw, 0, fm - hd),
@@ -683,20 +907,8 @@ def draw_first_person_view():
                 project(rm - hw, 0, fm + hd),
             ]
             if all(c is not None for c in corners):
-                pygame.draw.polygon(screen, apply_fade((40, 20, 60), fade), corners)
-                pygame.draw.polygon(screen, apply_fade(color, fade), corners, 2)
-                # Depth lines inward
-                inner = [
-                    project(rm - hw * 0.5, -ch, fm - hd * 0.5),
-                    project(rm + hw * 0.5, -ch, fm - hd * 0.5),
-                    project(rm + hw * 0.5, -ch, fm + hd * 0.5),
-                    project(rm - hw * 0.5, -ch, fm + hd * 0.5),
-                ]
-                if all(c is not None for c in inner):
-                    pygame.draw.polygon(screen, apply_fade((20, 10, 30), fade), inner)
-                    for j in range(4):
-                        pygame.draw.line(screen, apply_fade((60, 30, 80), fade),
-                                         corners[j], inner[j], 1)
+                pygame.draw.polygon(screen, apply_fade(fill_color, fade), corners)
+                pygame.draw.polygon(screen, apply_fade(border_color, fade), corners, 2)
         else:
             # --- Draw cuboid ---
             # 8 corners: ground (y=0) and top (y=ch)
@@ -865,8 +1077,38 @@ def draw_first_person_view():
     ctrl_y = HEIGHT - ctrl_box_h - scale_px(4)
     pygame.draw.rect(screen, (20, 20, 30), (scale_px(6), ctrl_y, SCENE_W - scale_px(12), ctrl_box_h))
     pygame.draw.rect(screen, (100, 150, 200), (scale_px(6), ctrl_y, SCENE_W - scale_px(12), ctrl_box_h), max(1, scale_px(1)))
-    ctrl = info_font.render("A/D: Rotate | W/S: Move | R: Reset | ESC: Quit", True, (150, 200, 255))
+    ctrl = info_font.render("A/D: Rotate | W/S: Move | SPACE: Jump | R: Reset | ESC: Quit", True, (150, 200, 255))
     screen.blit(ctrl, (scale_px(12), ctrl_y + scale_px(4)))
+    
+    # --- Pothole falling overlay ---
+    if player_in_pothole and not player_jumping:
+        # Dark vignette effect when in pothole
+        overlay = pygame.Surface((SCENE_W, HEIGHT), pygame.SRCALPHA)
+        # Darkness proportional to depth
+        depth_ratio = min(1.0, abs(player_y_offset) / abs(POTHOLE_DEPTH))
+        alpha = int(120 * depth_ratio)
+        overlay.fill((0, 0, 0, alpha))
+        screen.blit(overlay, (0, 0))
+        
+        # "IN POTHOLE" warning text
+        warn_pulse = (math.sin(time.time() * 4) + 1) / 2
+        warn_alpha = int(150 + 105 * warn_pulse)
+        warn_text = label_font.render("IN POTHOLE - Press SPACE to jump out!", True,
+                                       (255, warn_alpha, int(80 * warn_pulse)))
+        screen.blit(warn_text, (SCENE_W // 2 - warn_text.get_width() // 2, HEIGHT // 2 - scale_px(20)))
+        
+        # Draw rising ground walls on sides to simulate being in a pit
+        wall_height = int(HEIGHT * 0.3 * depth_ratio)
+        wall_color = (30, 20, 15)
+        # Left wall
+        pygame.draw.rect(screen, wall_color, (0, HEIGHT - wall_height, scale_px(30), wall_height))
+        # Right wall
+        pygame.draw.rect(screen, wall_color, (SCENE_W - scale_px(30), HEIGHT - wall_height, scale_px(30), wall_height))
+    
+    # --- Jump arc indicator ---
+    if player_jumping:
+        jump_text = info_font.render(f"JUMPING  Y: {player_y_offset:+.2f}m", True, (100, 255, 100))
+        screen.blit(jump_text, (SCENE_W // 2 - jump_text.get_width() // 2, scale_px(42)))
     
     # Release clip
     screen.set_clip(None)
@@ -882,10 +1124,8 @@ def draw_isometric_grid(heights, vibration, cell_obstacles):
     # Clip to right panel bounds
     screen.set_clip(pygame.Rect(panel_x, 0, panel_w, HEIGHT))
     
-    # Background with gradient
-    for y in range(HEIGHT):
-        gray = int(40 + (y / HEIGHT) * 30)
-        pygame.draw.line(screen, (gray, gray, gray + 5), (panel_x, y), (WIDTH, y))
+    # Background (solid - optimized from per-line gradient)
+    pygame.draw.rect(screen, (48, 48, 55), (panel_x, 0, panel_w, HEIGHT))
     
     # Draw top border with accent color
     pygame.draw.line(screen, (100, 150, 200), (panel_x, 0), (WIDTH, 0), 3)
@@ -1000,7 +1240,12 @@ def draw_isometric_grid(heights, vibration, cell_obstacles):
                     vib_offset = math.sin(t * 25) * 4
                 elif vib == "slow":
                     vib_offset = math.sin(t * 10) * 2
-                draw_iso_cuboid(ix + vib_offset, iy, h, vib, t)
+                obs_info = cell_obstacles[row][col]
+                elev_type = obs_info["elevation"] if obs_info else None
+                # Cliff potholes always vibrate on the tactile grid
+                if elev_type == "cliff_pothole":
+                    vib_offset = math.sin(t * 18) * 5
+                draw_iso_cuboid(ix + vib_offset, iy, h, vib, t, elev_type)
     
     # Info panel at bottom with background
     info_y = HEIGHT - scale_px(18)
@@ -1070,7 +1315,7 @@ def draw_iso_base_plate(cx, cy, w, h):
         (points[2][0], points[2][1] + depth),
     ])
 
-def draw_iso_cuboid(cx, cy, height_val, vibration, t):
+def draw_iso_cuboid(cx, cy, height_val, vibration, t, elev_type=None):
     """Draw isometric 3D cuboid based on height value"""
     # Cuboid dimensions (scaled)
     w = scale_px(30)  # Half-width
@@ -1082,8 +1327,10 @@ def draw_iso_cuboid(cx, cy, height_val, vibration, t):
     h = max(scale_px(18), h)  # Minimum height
     
     # Color based on elevation type and distance attenuation
-    if height_val < 0:  # Pothole
-        base_color = (120, 60, 180)  # Purple
+    if elev_type == "cliff_pothole":
+        base_color = (180, 30, 30)   # Dark red for cliff
+    elif height_val < 0:  # Shallow pothole
+        base_color = (140, 90, 200)  # Light purple
     elif abs(height_val) < 0.8:
         base_color = (80, 220, 80)   # Green - step
     elif abs(height_val) < 1.5:
@@ -1103,23 +1350,29 @@ def draw_iso_cuboid(cx, cy, height_val, vibration, t):
     right_color = tuple(max(0, c - 50) for c in base_color)
     top_color = tuple(min(255, c + 30) for c in base_color)
     
-    if height_val < 0:  # Pothole - draw as depression
-        # Draw hole
+    if height_val < 0:  # Pothole - flat coloured diamond (no depth)
+        is_cliff = (elev_type == "cliff_pothole")
         hole_points = [
             (cx, cy - d),
             (cx + w, cy),
             (cx, cy + d),
             (cx - w, cy),
         ]
-        pygame.draw.polygon(screen, (30, 15, 45), hole_points)
-        pygame.draw.polygon(screen, base_color, hole_points, 2)
+        if is_cliff:
+            # Pulsating vibration for cliff on tactile grid
+            pulse = (math.sin(t * 8) + 1) / 2
+            vib_r = int(140 + 115 * pulse)
+            fill = (vib_r, int(20 * pulse), int(20 * pulse))
+            border = (min(255, vib_r + 40), 50, 50)
+            # Vibration shake offset
+            shake = int(math.sin(t * 20) * 3)
+            hole_points = [(p[0] + shake, p[1]) for p in hole_points]
+        else:
+            fill = (140, 90, 200)
+            border = (170, 120, 230)
         
-        # Depth lines
-        inner_scale = 0.6
-        inner_points = [(cx + (p[0]-cx)*inner_scale, cy + (p[1]-cy)*inner_scale + 15) for p in hole_points]
-        for i in range(4):
-            pygame.draw.line(screen, (80, 40, 100), hole_points[i], inner_points[i], 1)
-        pygame.draw.polygon(screen, (20, 10, 30), inner_points)
+        pygame.draw.polygon(screen, fill, hole_points)
+        pygame.draw.polygon(screen, border, hole_points, 2)
         return
     
     # Top face (diamond)
@@ -1172,6 +1425,7 @@ def draw_tactile_device(heights, vibration, cell_obstacles):
 # -----------------------
 def main():
     global player_x, player_y, player_angle, last_update
+    global player_y_offset, player_y_target, player_in_pothole, player_jumping, player_jump_velocity
     
     running = True
     
@@ -1189,16 +1443,18 @@ def main():
     print("3×3 Tactile Grid Model")
     print("=" * 60)
     print("\nControls:")
-    print("  W/S - Move forward/backward")
-    print("  A/D - Rotate left/right")
-    print("  R   - Reset obstacles")
-    print("  ESC - Quit")
+    print("  W/S   - Move forward/backward")
+    print("  A/D   - Rotate left/right")
+    print("  SPACE - Jump (over steps / out of potholes)")
+    print("  R     - Reset obstacles")
+    print("  ESC   - Quit")
     print("\nTactile Encoding:")
-    print("  Green  = Step (can step over)")
-    print("  Yellow = Mid (deflect/redirect)")
-    print("  Red    = Top (avoid - head level)")
-    print("  Purple = Pothole (drop below surface)")
-    print("  Vibration = Moving obstacle")
+    print("  Green       = Step (jump over with SPACE)")
+    print("  Yellow      = Mid (deflect/redirect)")
+    print("  Red         = Top (avoid - head level)")
+    print("  Lt. Purple  = Shallow Pothole (fall in, SPACE to escape)")
+    print("  Dark Red    = Cliff Pothole (DANGER - impassable!)")
+    print("  Vibration   = Moving obstacle")
     print("=" * 60)
     
     while running:
@@ -1212,7 +1468,20 @@ def main():
                     running = False
                 elif event.key == pygame.K_r:
                     generate_obstacles()
+                    player_y_offset = 0.0
+                    player_y_target = 0.0
+                    player_in_pothole = False
+                    player_jumping = False
+                    player_jump_velocity = 0.0
                     print("Obstacles reset!")
+                elif event.key == pygame.K_SPACE:
+                    # Jump: works when on ground OR in pothole
+                    if not player_jumping:
+                        player_jumping = True
+                        player_jump_velocity = JUMP_STRENGTH
+                        if player_in_pothole:
+                            # Extra boost to escape pothole
+                            player_jump_velocity = JUMP_STRENGTH * 1.2
         
         # Input handling
         pressed = pygame.key.get_pressed()
@@ -1236,6 +1505,14 @@ def main():
             player_angle -= rot_speed
         if pressed[pygame.K_d] or pressed[pygame.K_RIGHT]:
             player_angle += rot_speed
+        
+        # Update player vertical state (jumping / falling)
+        dt = 1.0 / 60.0  # Frame delta time
+        update_player_vertical(dt)
+        
+        # Slow movement when in pothole
+        if player_in_pothole and not player_jumping:
+            pass  # Movement is already handled above, could add slowdown here
         
         # Update at 5 Hz
         current_time = time.time()
