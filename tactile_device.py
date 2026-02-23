@@ -7,22 +7,59 @@ import time
 pygame.init()
 
 # -----------------------
-# WINDOW SETUP
+# WINDOW SETUP (Resolution Adaptive)
 # -----------------------
-WIDTH = 1600
-HEIGHT = 1000
-SCENE_W = WIDTH // 2
+# Get display resolution
+_info = pygame.display.Info()
+MONITOR_WIDTH = _info.current_w
+MONITOR_HEIGHT = _info.current_h
 
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
+# Base design resolution (all layout authored at this size)
+BASE_WIDTH = 1600
+BASE_HEIGHT = 1000
+
+# Account for taskbar + title bar (~70 px on Windows)
+USABLE_W = MONITOR_WIDTH
+USABLE_H = MONITOR_HEIGHT - 70
+
+# Fit within usable area while keeping 16:10 aspect
+_target_w = min(USABLE_W, BASE_WIDTH)
+_target_h = int(_target_w * BASE_HEIGHT / BASE_WIDTH)
+if _target_h > USABLE_H:
+    _target_h = USABLE_H
+    _target_w = int(_target_h * BASE_WIDTH / BASE_HEIGHT)
+
+WIDTH = _target_w
+HEIGHT = _target_h
+SCENE_W = WIDTH // 2
+SCALE_FACTOR = WIDTH / BASE_WIDTH
+
+screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
 pygame.display.set_caption("Directional Tactile Navigation Device - 3×3 Grid Simulation")
 clock = pygame.time.Clock()
 
-# Fonts with proper scaling
+# Fonts (rebuilt on resize)
 pygame.font.init()
-title_font = pygame.font.Font(None, 40)
-label_font = pygame.font.Font(None, 30)
-small_font = pygame.font.Font(None, 24)
-info_font = pygame.font.Font(None, 22)
+title_font = label_font = small_font = info_font = None
+
+def rebuild_fonts():
+    global title_font, label_font, small_font, info_font
+    title_font = pygame.font.Font(None, max(20, int(40 * SCALE_FACTOR)))
+    label_font = pygame.font.Font(None, max(16, int(30 * SCALE_FACTOR)))
+    small_font = pygame.font.Font(None, max(13, int(24 * SCALE_FACTOR)))
+    info_font  = pygame.font.Font(None, max(12, int(22 * SCALE_FACTOR)))
+
+def handle_resize(new_w, new_h):
+    """Recalculate all layout globals after a window resize."""
+    global WIDTH, HEIGHT, SCENE_W, SCALE_FACTOR, screen
+    WIDTH = max(800, new_w)
+    HEIGHT = max(500, new_h)
+    SCENE_W = WIDTH // 2
+    SCALE_FACTOR = WIDTH / BASE_WIDTH
+    screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
+    rebuild_fonts()
+
+rebuild_fonts()
 
 # -----------------------
 # SYSTEM CONSTANTS (from spec)
@@ -140,9 +177,13 @@ def normalize_angle(a):
 
 def world_to_screen(wx, wy):
     """Convert world coords to screen coords - scaled to fit viewport"""
-    sx = SCENE_W / 2 + (wx - player_x) * VIEW_SCALE
-    sy = HEIGHT / 2 + (wy - player_y) * VIEW_SCALE
+    sx = (SCENE_W / 2) + (wx - player_x) * VIEW_SCALE
+    sy = (HEIGHT / 2) + (wy - player_y) * VIEW_SCALE
     return sx, sy
+
+def scale_px(base_px):
+    """Scale pixel value based on current resolution"""
+    return int(base_px * SCALE_FACTOR)
 
 def get_distance_meters(dist_pixels):
     return dist_pixels / SCALE
@@ -282,14 +323,14 @@ def draw_scene():
     pygame.draw.rect(screen, (25, 25, 35), (0, 0, SCENE_W, HEIGHT))
     
     # Top border accent
-    pygame.draw.line(screen, (100, 200, 255), (0, 0), (SCENE_W, 0), 3)
+    pygame.draw.line(screen, (100, 200, 255), (0, 0), (SCENE_W, 0), scale_px(3))
     
     # Title with background box
     title = title_font.render("Environment View (Top-Down)", True, (200, 200, 200))
-    title_box_height = 45
-    pygame.draw.rect(screen, (30, 30, 50), (0, 5, SCENE_W, title_box_height))
-    pygame.draw.rect(screen, (100, 200, 255), (0, 5, SCENE_W, title_box_height), 2)
-    screen.blit(title, (SCENE_W//2 - title.get_width()//2, 12))
+    title_box_height = scale_px(45)
+    pygame.draw.rect(screen, (30, 30, 50), (0, scale_px(5), SCENE_W, title_box_height))
+    pygame.draw.rect(screen, (100, 200, 255), (0, scale_px(5), SCENE_W, title_box_height), scale_px(2))
+    screen.blit(title, (SCENE_W//2 - title.get_width()//2, scale_px(12)))
     center = (SCENE_W//2, HEIGHT//2)
     fov_len = MAX_RANGE * SCALE * VIEW_SCALE
     
@@ -308,13 +349,13 @@ def draw_scene():
     
     # FOV fill
     pygame.draw.polygon(screen, (40, 50, 70), fov_points)
-    pygame.draw.polygon(screen, (80, 100, 140), fov_points, 2)
+    pygame.draw.polygon(screen, (80, 100, 140), fov_points, scale_px(2))
     
     # Distance rings (1m, 2m, 3m) with improved labels
     ring_colors = [(80, 200, 80), (200, 200, 80), (200, 80, 80)]
     for i, (row, info) in enumerate(DISTANCE_LAYERS.items()):
         radius = int(info["range"][1] * SCALE * VIEW_SCALE)
-        pygame.draw.circle(screen, ring_colors[i], center, radius, 2)
+        pygame.draw.circle(screen, ring_colors[i], center, radius, scale_px(2))
         # Label positioning - along a fixed angle for consistency
         label = label_font.render(f'{info["range"][1]}m', True, ring_colors[i])
         label_angle = player_angle + math.radians(75)
@@ -327,11 +368,11 @@ def draw_scene():
         angle = player_angle + math.radians(angle_offset)
         end = (center[0] + fov_len * math.cos(angle),
                center[1] + fov_len * math.sin(angle))
-        pygame.draw.line(screen, (100, 100, 150), center, end, 1)
+        pygame.draw.line(screen, (100, 100, 150), center, end, scale_px(1))
     
     # Draw outer boundary circle (slightly beyond 3m) for visual clarity
-    outer_radius = int(MAX_RANGE * SCALE * VIEW_SCALE) + 8
-    pygame.draw.circle(screen, (50, 50, 65), center, outer_radius, 1)
+    outer_radius = int(MAX_RANGE * SCALE * VIEW_SCALE) + scale_px(8)
+    pygame.draw.circle(screen, (50, 50, 65), center, outer_radius, scale_px(1))
     
     # Draw obstacles
     for obs in obstacles:
@@ -351,29 +392,29 @@ def draw_scene():
             
             if in_fov:
                 # Highlight obstacles in FOV
-                pygame.draw.circle(screen, (255, 255, 255), (int(sx), int(sy)), max(5, size) + 4, 2)
+                pygame.draw.circle(screen, (255, 255, 255), (int(sx), int(sy)), max(5, size) + scale_px(4), scale_px(2))
             
             if obs["moving"]:
                 pulse = int(abs(math.sin(time.time() * 5)) * 3)
-                pygame.draw.circle(screen, (255, 255, 100), (int(sx), int(sy)), size + pulse + 3, 2)
+                pygame.draw.circle(screen, (255, 255, 100), (int(sx), int(sy)), size + pulse + scale_px(3), scale_px(2))
             
             # Draw 3D obstacle representation
             draw_3d_obstacle(sx, sy, obs["elevation"], size)
     
     # Draw player with clear ARROW for direction
-    pygame.draw.circle(screen, (255, 255, 255), center, 10)
-    pygame.draw.circle(screen, (50, 150, 255), center, 8)
+    pygame.draw.circle(screen, (255, 255, 255), center, scale_px(10))
+    pygame.draw.circle(screen, (50, 150, 255), center, scale_px(8))
     
     # Direction arrow (prominent)
-    arrow_len = 28
+    arrow_len = scale_px(28)
     arrow_tip = (center[0] + arrow_len * math.cos(player_angle),
                  center[1] + arrow_len * math.sin(player_angle))
     
     # Arrow shaft
-    pygame.draw.line(screen, (255, 255, 255), center, arrow_tip, 3)
+    pygame.draw.line(screen, (255, 255, 255), center, arrow_tip, scale_px(3))
     
     # Arrow head
-    head_len = 12
+    head_len = scale_px(12)
     head_angle = math.radians(25)
     left_head = (arrow_tip[0] - head_len * math.cos(player_angle - head_angle),
                  arrow_tip[1] - head_len * math.sin(player_angle - head_angle))
@@ -393,39 +434,39 @@ def draw_scene():
     angle_str = f"Facing: {angle_deg:.0f}°  ({cardinal})"
     angle_text = label_font.render(angle_str, True, (200, 255, 200))
     
-    angle_box_w = angle_text.get_width() + 30
-    angle_box_h = 40
+    angle_box_w = angle_text.get_width() + scale_px(30)
+    angle_box_h = scale_px(40)
     angle_box_x = SCENE_W//2 - angle_box_w//2
-    angle_box_y = center[1] + int(MAX_RANGE * SCALE * VIEW_SCALE) + 20
+    angle_box_y = center[1] + int(MAX_RANGE * SCALE * VIEW_SCALE) + scale_px(20)
     
     pygame.draw.rect(screen, (20, 40, 30), (angle_box_x, angle_box_y, angle_box_w, angle_box_h))
-    pygame.draw.rect(screen, (100, 255, 100), (angle_box_x, angle_box_y, angle_box_w, angle_box_h), 2)
-    screen.blit(angle_text, (angle_box_x + 15, angle_box_y + 8))
+    pygame.draw.rect(screen, (100, 255, 100), (angle_box_x, angle_box_y, angle_box_w, angle_box_h), scale_px(2))
+    screen.blit(angle_text, (angle_box_x + scale_px(15), angle_box_y + scale_px(8)))
     
     # Legend with background - positioned bottom-left
-    y_off = HEIGHT - 135
-    legend_bg_height = 130
-    pygame.draw.rect(screen, (20, 20, 30), (10, y_off - 5, 180, legend_bg_height))
-    pygame.draw.rect(screen, (80, 120, 160), (10, y_off - 5, 180, legend_bg_height), 2)
+    y_off = HEIGHT - scale_px(135)
+    legend_bg_height = scale_px(130)
+    pygame.draw.rect(screen, (20, 20, 30), (scale_px(10), y_off - scale_px(5), scale_px(180), legend_bg_height))
+    pygame.draw.rect(screen, (80, 120, 160), (scale_px(10), y_off - scale_px(5), scale_px(180), legend_bg_height), scale_px(2))
     
     legend_title = label_font.render("Obstacles:", True, (100, 200, 255))
-    screen.blit(legend_title, (20, y_off))
-    y_off += 30
+    screen.blit(legend_title, (scale_px(20), y_off))
+    y_off += scale_px(30)
     for name, info in ELEVATION_TYPES.items():
         if name != "ground":
-            pygame.draw.rect(screen, info["color"], (25, y_off, 14, 14))
+            pygame.draw.rect(screen, info["color"], (scale_px(25), y_off, scale_px(14), scale_px(14)))
             label = small_font.render(info["label"], True, (200, 200, 200))
-            screen.blit(label, (48, y_off - 2))
-            y_off += 25
+            screen.blit(label, (scale_px(48), y_off - scale_px(2)))
+            y_off += scale_px(25)
     
     # Controls hint with background - bottom
-    ctrl_y = HEIGHT - 45
-    ctrl_bg_height = 40
-    pygame.draw.rect(screen, (20, 20, 30), (10, ctrl_y - 5, SCENE_W - 20, ctrl_bg_height))
-    pygame.draw.rect(screen, (100, 150, 200), (10, ctrl_y - 5, SCENE_W - 20, ctrl_bg_height), 1)
+    ctrl_y = HEIGHT - scale_px(45)
+    ctrl_bg_height = scale_px(40)
+    pygame.draw.rect(screen, (20, 20, 30), (scale_px(10), ctrl_y - scale_px(5), SCENE_W - scale_px(20), ctrl_bg_height))
+    pygame.draw.rect(screen, (100, 150, 200), (scale_px(10), ctrl_y - scale_px(5), SCENE_W - scale_px(20), ctrl_bg_height), scale_px(1))
     
     ctrl = info_font.render("A/D: Rotate | W/S: Move | R: Reset | ESC: Quit", True, (150, 200, 255))
-    screen.blit(ctrl, (20, ctrl_y))
+    screen.blit(ctrl, (scale_px(20), ctrl_y))
 
 def draw_3d_obstacle(sx, sy, elevation, size):
     """Draw a 3D cuboid obstacle in environment view"""
@@ -433,10 +474,10 @@ def draw_3d_obstacle(sx, sy, elevation, size):
     color = elev_info["color"]
     height = abs(elev_info["height"])
     
-    # 3D parameters
+    # 3D parameters (scaled)
     cube_w = size * 1.5
-    cube_h = height * 15 + 10
-    iso_offset = 8  # Isometric offset
+    cube_h = height * (15 * SCALE_FACTOR) + scale_px(10)
+    iso_offset = scale_px(8)  # Isometric offset
     
     if elev_info["height"] < 0:  # Pothole - draw as depression
         pygame.draw.ellipse(screen, (40, 20, 60), (sx - cube_w, sy - cube_w//2, cube_w*2, cube_w))
@@ -480,6 +521,9 @@ def draw_3d_obstacle(sx, sy, elevation, size):
 # -----------------------
 def draw_first_person_view():
     """Draw first-person 3D perspective view showing ground plane with cuboid obstacles"""
+    
+    # Clip all drawing to the left panel
+    screen.set_clip(pygame.Rect(0, 0, SCENE_W, HEIGHT))
     
     horizon_y = int(HEIGHT * 0.42)
     focal = (SCENE_W / 2) / math.tan(FOV / 2)
@@ -690,12 +734,98 @@ def draw_first_person_view():
                 mov_color = (255, int(255 * pulse), 50)
                 pygame.draw.polygon(screen, mov_color, front, 2)
     
+    # --- Circular Minimap (Top Left, below title) ---
+    minimap_radius = max(40, int(HEIGHT * 0.09))
+    minimap_x = scale_px(10) + minimap_radius
+    minimap_y = scale_px(55) + minimap_radius
+    minimap_scale = minimap_radius / MAX_RANGE
+    
+    # Background circle
+    pygame.draw.circle(screen, (20, 20, 30), (minimap_x, minimap_y), minimap_radius)
+    pygame.draw.circle(screen, (80, 100, 140), (minimap_x, minimap_y), minimap_radius, max(1, scale_px(2)))
+    
+    # Distance rings
+    ring_colors = [(80, 200, 80), (200, 200, 80), (200, 80, 80)]
+    for i, d in enumerate([1.0, 2.0, 3.0]):
+        r = int(d * minimap_scale)
+        pygame.draw.circle(screen, ring_colors[i], (minimap_x, minimap_y), r, max(1, scale_px(1)))
+    
+    # FOV cone in minimap
+    fov_len = minimap_radius
+    left_angle = player_angle - FOV / 2
+    right_angle = player_angle + FOV / 2
+    fov_pts = [(minimap_x, minimap_y)]
+    num_arc = 12
+    for i in range(num_arc + 1):
+        angle = left_angle + (right_angle - left_angle) * i / num_arc
+        px = minimap_x + fov_len * math.cos(angle)
+        py = minimap_y + fov_len * math.sin(angle)
+        fov_pts.append((px, py))
+    pygame.draw.polygon(screen, (40, 50, 80), fov_pts)
+    pygame.draw.polygon(screen, (80, 120, 160), fov_pts, max(1, scale_px(1)))
+    
+    # Draw obstacles on minimap
+    for obs in obstacles:
+        dx = obs["x"] - player_x
+        dy = obs["y"] - player_y
+        dist = math.hypot(dx, dy)
+        if dist > MAX_RANGE * SCALE:
+            continue
+        angle = math.atan2(dy, dx)
+        dist_m = dist / SCALE
+        obs_x = minimap_x + (dist_m * math.cos(angle)) * minimap_scale
+        obs_y = minimap_y + (dist_m * math.sin(angle)) * minimap_scale
+        # Only draw if within minimap circle
+        if math.hypot(obs_x - minimap_x, obs_y - minimap_y) <= minimap_radius:
+            elev = obs["elevation"]
+            color = ELEVATION_TYPES[elev]["color"]
+            obs_size = max(2, scale_px(3))
+            if obs.get("moving"):
+                pulse = int(abs(math.sin(time.time() * 5)) * 2)
+                pygame.draw.circle(screen, (255, 255, 100), (int(obs_x), int(obs_y)), obs_size + pulse + 1, 1)
+            pygame.draw.circle(screen, color, (int(obs_x), int(obs_y)), obs_size)
+    
+    # Player marker (center)
+    pygame.draw.circle(screen, (255, 255, 255), (minimap_x, minimap_y), max(3, scale_px(4)))
+    pygame.draw.circle(screen, (50, 150, 255), (minimap_x, minimap_y), max(2, scale_px(3)))
+    
+    # Player heading arrow
+    arrow_len = max(10, scale_px(16))
+    arrow_tip_x = minimap_x + arrow_len * math.cos(player_angle)
+    arrow_tip_y = minimap_y + arrow_len * math.sin(player_angle)
+    pygame.draw.line(screen, (255, 255, 255), (minimap_x, minimap_y), (int(arrow_tip_x), int(arrow_tip_y)), max(1, scale_px(2)))
+    
+    # Minimap label
+    mm_label = info_font.render("Minimap", True, (100, 200, 255))
+    screen.blit(mm_label, (minimap_x - mm_label.get_width() // 2, minimap_y + minimap_radius + scale_px(4)))
+    
     # --- Title ---
     title = title_font.render("Player View (Blind Navigation)", True, (200, 200, 200))
-    title_box_h = 45
-    pygame.draw.rect(screen, (30, 30, 50), (0, 5, SCENE_W, title_box_h))
-    pygame.draw.rect(screen, (100, 200, 255), (0, 5, SCENE_W, title_box_h), 2)
-    screen.blit(title, (SCENE_W // 2 - title.get_width() // 2, 12))
+    title_box_h = scale_px(35)
+    pygame.draw.rect(screen, (30, 30, 50), (0, 0, SCENE_W, title_box_h))
+    pygame.draw.rect(screen, (100, 200, 255), (0, 0, SCENE_W, title_box_h), max(1, scale_px(2)))
+    screen.blit(title, (SCENE_W // 2 - title.get_width() // 2, scale_px(6)))
+    
+    # --- Legend (Top Right of left panel) ---
+    legend_item_h = max(14, scale_px(18))
+    num_legend = sum(1 for n in ELEVATION_TYPES if n != "ground")
+    legend_h = scale_px(22) + num_legend * legend_item_h + scale_px(4)
+    legend_w = max(90, scale_px(120))
+    legend_x = SCENE_W - legend_w - scale_px(8)
+    legend_y = scale_px(40)
+    
+    pygame.draw.rect(screen, (15, 15, 25), (legend_x, legend_y, legend_w, legend_h))
+    pygame.draw.rect(screen, (80, 120, 160), (legend_x, legend_y, legend_w, legend_h), max(1, scale_px(1)))
+    lt = info_font.render("Obstacles:", True, (100, 200, 255))
+    screen.blit(lt, (legend_x + scale_px(6), legend_y + scale_px(3)))
+    ly = legend_y + scale_px(20)
+    for name, einfo in ELEVATION_TYPES.items():
+        if name != "ground":
+            sz = max(8, scale_px(10))
+            pygame.draw.rect(screen, einfo["color"], (legend_x + scale_px(6), ly, sz, sz))
+            lbl = info_font.render(einfo["label"], True, (200, 200, 200))
+            screen.blit(lbl, (legend_x + scale_px(6) + sz + scale_px(4), ly))
+            ly += legend_item_h
     
     # --- Facing direction ---
     angle_deg = math.degrees(player_angle) % 360
@@ -704,35 +834,24 @@ def draw_first_person_view():
     cardinal = cardinals[cardinal_idx]
     angle_str = f"Facing: {angle_deg:.0f}\u00b0 ({cardinal})"
     angle_text = label_font.render(angle_str, True, (200, 255, 200))
-    angle_box_w = angle_text.get_width() + 30
-    angle_box_h = 40
+    angle_box_w = angle_text.get_width() + scale_px(16)
+    angle_box_h = scale_px(28)
     angle_box_x = SCENE_W // 2 - angle_box_w // 2
-    angle_box_y = HEIGHT - 90
+    angle_box_y = HEIGHT - scale_px(58)
     pygame.draw.rect(screen, (20, 40, 30), (angle_box_x, angle_box_y, angle_box_w, angle_box_h))
-    pygame.draw.rect(screen, (100, 255, 100), (angle_box_x, angle_box_y, angle_box_w, angle_box_h), 2)
-    screen.blit(angle_text, (angle_box_x + 15, angle_box_y + 8))
-    
-    # --- Legend ---
-    y_off = 60
-    legend_bg_h = 130
-    pygame.draw.rect(screen, (20, 20, 30), (10, y_off - 5, 180, legend_bg_h))
-    pygame.draw.rect(screen, (80, 120, 160), (10, y_off - 5, 180, legend_bg_h), 2)
-    legend_title = label_font.render("Obstacles:", True, (100, 200, 255))
-    screen.blit(legend_title, (20, y_off))
-    y_off += 30
-    for name, einfo in ELEVATION_TYPES.items():
-        if name != "ground":
-            pygame.draw.rect(screen, einfo["color"], (25, y_off, 14, 14))
-            lbl = small_font.render(einfo["label"], True, (200, 200, 200))
-            screen.blit(lbl, (48, y_off - 2))
-            y_off += 25
+    pygame.draw.rect(screen, (100, 255, 100), (angle_box_x, angle_box_y, angle_box_w, angle_box_h), max(1, scale_px(2)))
+    screen.blit(angle_text, (angle_box_x + scale_px(8), angle_box_y + scale_px(4)))
     
     # --- Controls ---
-    ctrl_y = HEIGHT - 45
-    pygame.draw.rect(screen, (20, 20, 30), (10, ctrl_y - 5, SCENE_W - 20, 40))
-    pygame.draw.rect(screen, (100, 150, 200), (10, ctrl_y - 5, SCENE_W - 20, 40), 1)
+    ctrl_box_h = scale_px(24)
+    ctrl_y = HEIGHT - ctrl_box_h - scale_px(4)
+    pygame.draw.rect(screen, (20, 20, 30), (scale_px(6), ctrl_y, SCENE_W - scale_px(12), ctrl_box_h))
+    pygame.draw.rect(screen, (100, 150, 200), (scale_px(6), ctrl_y, SCENE_W - scale_px(12), ctrl_box_h), max(1, scale_px(1)))
     ctrl = info_font.render("A/D: Rotate | W/S: Move | R: Reset | ESC: Quit", True, (150, 200, 255))
-    screen.blit(ctrl, (20, ctrl_y))
+    screen.blit(ctrl, (scale_px(12), ctrl_y + scale_px(4)))
+    
+    # Release clip
+    screen.set_clip(None)
 
 # -----------------------
 # 3D ISOMETRIC TACTILE GRID
@@ -741,6 +860,9 @@ def draw_isometric_grid(heights, vibration, cell_obstacles):
     """Draw isometric 3D tactile grid like the reference image"""
     panel_x = SCENE_W
     panel_w = WIDTH - SCENE_W
+    
+    # Clip to right panel bounds
+    screen.set_clip(pygame.Rect(panel_x, 0, panel_w, HEIGHT))
     
     # Background with gradient
     for y in range(HEIGHT):
@@ -752,17 +874,17 @@ def draw_isometric_grid(heights, vibration, cell_obstacles):
     
     # Title with background box
     title = title_font.render("3×3 Tactile Grid Device", True, (220, 220, 220))
-    title_box_height = 45
-    pygame.draw.rect(screen, (30, 30, 50), (panel_x, 5, panel_w, title_box_height))
-    pygame.draw.rect(screen, (100, 150, 200), (panel_x, 5, panel_w, title_box_height), 2)
-    screen.blit(title, (panel_x + panel_w//2 - title.get_width()//2, 12))
+    title_box_height = scale_px(45)
+    pygame.draw.rect(screen, (30, 30, 50), (panel_x, scale_px(5), panel_w, title_box_height))
+    pygame.draw.rect(screen, (100, 150, 200), (panel_x, scale_px(5), panel_w, title_box_height), scale_px(2))
+    screen.blit(title, (panel_x + panel_w//2 - title.get_width()//2, scale_px(12)))
     
-    # Isometric grid parameters - optimized for new window size
-    grid_center_x = panel_x + panel_w // 2
-    grid_center_y = HEIGHT // 2 + 60
+    # Isometric grid parameters - centered in available space
+    grid_center_x = panel_x + panel_w // 2 + scale_px(20)
+    grid_center_y = HEIGHT // 2 + scale_px(20)
     
-    cell_w = 120  # Cell width in isometric view
-    cell_h = 80   # Cell depth in isometric view
+    cell_w = scale_px(100)  # Cell width in isometric view
+    cell_h = scale_px(65)   # Cell depth in isometric view
     
     # Isometric transformation
     iso_angle = math.radians(30)
@@ -781,66 +903,69 @@ def draw_isometric_grid(heights, vibration, cell_obstacles):
     t = time.time()
     
     # Draw row labels (Distance) - positioned on separate left panel
-    row_label_panel_x = panel_x + 15
-    row_label_panel_y = grid_center_y - 160
-    row_box_width = 140
+    row_label_panel_x = panel_x + scale_px(8)
+    row_label_panel_y = grid_center_y - scale_px(120)
+    row_box_width = scale_px(110)
     row_boxes = []  # Store box positions for later reference
     
     # Distance header
     row_header = label_font.render("DISTANCE", True, (100, 200, 255))
-    screen.blit(row_header, (row_label_panel_x, grid_center_y - 200))
+    screen.blit(row_header, (row_label_panel_x, row_label_panel_y - scale_px(28)))
     
     # Draw each distance category as a separate labeled box
     row_names = ["IMMEDIATE", "NEAR", "FAR"]
     row_ranges = ["0-1m", "1-2m", "2-3m"]
     row_colors = [(200, 80, 80), (200, 200, 80), (100, 200, 100)]
     
+    row_box_h = scale_px(48)
+    row_box_gap = scale_px(55)
     for r, (name, range_text, color) in enumerate(zip(row_names, row_ranges, row_colors)):
-        box_y = row_label_panel_y + r * 70
-        row_boxes.append((row_label_panel_x, box_y, row_box_width, 65))
+        box_y = row_label_panel_y + r * row_box_gap
+        row_boxes.append((row_label_panel_x, box_y, row_box_width, row_box_h))
         
         # Draw background box
-        pygame.draw.rect(screen, (25, 25, 40), (row_label_panel_x, box_y, row_box_width, 65))
-        pygame.draw.rect(screen, color, (row_label_panel_x, box_y, row_box_width, 65), 2)
+        pygame.draw.rect(screen, (25, 25, 40), (row_label_panel_x, box_y, row_box_width, row_box_h))
+        pygame.draw.rect(screen, color, (row_label_panel_x, box_y, row_box_width, row_box_h), scale_px(2))
         
         # Draw colored indicator bar on left
-        pygame.draw.rect(screen, color, (row_label_panel_x - 8, box_y, 8, 65))
+        pygame.draw.rect(screen, color, (row_label_panel_x - scale_px(6), box_y, scale_px(6), row_box_h))
         
         # Draw text
-        distance_label = label_font.render(name, True, (220, 220, 220))
-        range_label = small_font.render(range_text, True, color)
-        screen.blit(distance_label, (row_label_panel_x + 8, box_y + 12))
-        screen.blit(range_label, (row_label_panel_x + 8, box_y + 38))
+        distance_label = small_font.render(name, True, (220, 220, 220))
+        range_label = info_font.render(range_text, True, color)
+        screen.blit(distance_label, (row_label_panel_x + scale_px(6), box_y + scale_px(6)))
+        screen.blit(range_label, (row_label_panel_x + scale_px(6), box_y + scale_px(26)))
     
     # Draw column labels at bottom with better spacing
-    col_header_y = HEIGHT - 110
+    col_header_y = HEIGHT - scale_px(80)
     col_header = label_font.render("DIRECTION", True, (100, 200, 255))
     screen.blit(col_header, (grid_center_x - col_header.get_width()//2, col_header_y))
     
     for c in range(3):
         ix, _ = iso_transform(c, 3.5)
-        col_y = HEIGHT - 65
+        col_y = HEIGHT - scale_px(55)
         
         # Draw background box
-        col_width = 130
-        col_height = 50
+        col_width = scale_px(90)
+        col_height = scale_px(35)
         col_colors_list = [(255, 100, 100), (100, 255, 100), (100, 100, 255)]
         col_color = col_colors_list[c]
         
         pygame.draw.rect(screen, (25, 25, 40), (ix - col_width//2, col_y, col_width, col_height))
-        pygame.draw.rect(screen, col_color, (ix - col_width//2, col_y, col_width, col_height), 2)
+        pygame.draw.rect(screen, col_color, (ix - col_width//2, col_y, col_width, col_height), scale_px(2))
         
         # Draw colored bar on top
-        pygame.draw.rect(screen, col_color, (ix - col_width//2, col_y - 5, col_width, 5))
+        pygame.draw.rect(screen, col_color, (ix - col_width//2, col_y - scale_px(3), col_width, scale_px(3)))
         
         # Draw label
         col_labels_list = ["LEFT", "CENTER", "RIGHT"]
-        label = label_font.render(col_labels_list[c], True, col_color)
-        screen.blit(label, (ix - label.get_width()//2, col_y + 10))
+        label = small_font.render(col_labels_list[c], True, col_color)
+        screen.blit(label, (ix - label.get_width()//2, col_y + scale_px(6)))
     
     # Add visual separator line between left panel and grid
-    pygame.draw.line(screen, (80, 100, 130), (row_label_panel_x + row_box_width + 15, grid_center_y - 220), 
-                     (row_label_panel_x + row_box_width + 15, grid_center_y + 180), 2)
+    sep_x = row_label_panel_x + row_box_width + scale_px(10)
+    pygame.draw.line(screen, (80, 100, 130), (sep_x, row_label_panel_y - scale_px(28)), 
+                     (sep_x, row_label_panel_y + 3 * row_box_gap), scale_px(1))
     
     # Draw grid cells and cuboids (back to front: FAR first, then NEAR, then IMM)
     for row in range(2, -1, -1):  # Distance: 2=far(back) drawn first, 0=immediate(front) last
@@ -860,12 +985,12 @@ def draw_isometric_grid(heights, vibration, cell_obstacles):
                 draw_iso_cuboid(ix + vib_offset, iy, h, vib, t)
     
     # Info panel at bottom with background
-    info_y = HEIGHT - 32
+    info_y = HEIGHT - scale_px(18)
     safe_dir = compute_safe_direction(heights)
     
     # Draw info panel background
-    pygame.draw.rect(screen, (25, 25, 40), (panel_x, info_y - 5, panel_w, 35))
-    pygame.draw.line(screen, (100, 120, 150), (panel_x, info_y - 5), (WIDTH, info_y - 5), 1)
+    pygame.draw.rect(screen, (25, 25, 40), (panel_x, info_y - scale_px(8), panel_w, scale_px(26)))
+    pygame.draw.line(screen, (100, 120, 150), (panel_x, info_y - scale_px(8)), (WIDTH, info_y - scale_px(8)), scale_px(1))
     
     # Info panel with corrected direction
     safe_dir_label = ['Left', 'Center', 'Right']
@@ -881,14 +1006,17 @@ def draw_isometric_grid(heights, vibration, cell_obstacles):
     ]
     info_labels = ["Timestep:", "Rate:", "Range:", "FOV:", "Direction:"]
     
-    x_pos = panel_x + 15
+    x_pos = panel_x + scale_px(10)
     for label, value in zip(info_labels, info_parts):
-        label_surf = small_font.render(label, True, (150, 150, 180))
+        label_surf = info_font.render(label, True, (150, 150, 180))
         value_color = safe_dir_color if "Safe" in label else (200, 200, 200)
-        value_surf = small_font.render(value, True, value_color)
+        value_surf = info_font.render(value, True, value_color)
         screen.blit(label_surf, (x_pos, info_y))
-        screen.blit(value_surf, (x_pos + label_surf.get_width() + 5, info_y))
-        x_pos += label_surf.get_width() + value_surf.get_width() + 50
+        screen.blit(value_surf, (x_pos + label_surf.get_width() + scale_px(3), info_y))
+        x_pos += label_surf.get_width() + value_surf.get_width() + scale_px(20)
+
+    # Release clip
+    screen.set_clip(None)
 
 def draw_iso_base_plate(cx, cy, w, h):
     """Draw isometric base plate (black platform)"""
@@ -901,15 +1029,16 @@ def draw_iso_base_plate(cx, cy, w, h):
     ]
     
     # Shadow
-    shadow_points = [(p[0] + 3, p[1] + 3) for p in points]
+    shadow_off = scale_px(3)
+    shadow_points = [(p[0] + shadow_off, p[1] + shadow_off) for p in points]
     pygame.draw.polygon(screen, (15, 15, 20), shadow_points)
     
     # Base plate
     pygame.draw.polygon(screen, (25, 25, 30), points)
-    pygame.draw.polygon(screen, (60, 60, 70), points, 2)
+    pygame.draw.polygon(screen, (60, 60, 70), points, scale_px(2))
     
     # Side faces for 3D effect
-    depth = 8
+    depth = scale_px(6)
     # Right side
     pygame.draw.polygon(screen, (20, 20, 25), [
         points[1], points[2],
@@ -925,14 +1054,14 @@ def draw_iso_base_plate(cx, cy, w, h):
 
 def draw_iso_cuboid(cx, cy, height_val, vibration, t):
     """Draw isometric 3D cuboid based on height value"""
-    # Cuboid dimensions
-    w = 35  # Half-width
-    d = 20  # Half-depth (isometric)
+    # Cuboid dimensions (scaled)
+    w = scale_px(30)  # Half-width
+    d = scale_px(18)  # Half-depth (isometric)
     
     # Height calculation - taller for higher obstacles
-    max_h = 150
+    max_h = scale_px(120)
     h = abs(height_val) / 3.0 * max_h
-    h = max(20, h)  # Minimum height
+    h = max(scale_px(18), h)  # Minimum height
     
     # Color based on elevation type and distance attenuation
     if height_val < 0:  # Pothole
@@ -1049,6 +1178,8 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            elif event.type == pygame.VIDEORESIZE:
+                handle_resize(event.w, event.h)
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
