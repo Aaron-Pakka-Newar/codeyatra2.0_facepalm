@@ -6,9 +6,6 @@ import time
 # Initialize pygame
 pygame.init()
 
-# -----------------------
-# WINDOW SETUP
-# -----------------------
 WIDTH = 1400
 HEIGHT = 700
 SCENE_W = WIDTH // 2
@@ -23,9 +20,6 @@ title_font = pygame.font.Font(None, 32)
 label_font = pygame.font.Font(None, 24)
 small_font = pygame.font.Font(None, 20)
 
-# -----------------------
-# SYSTEM CONSTANTS (from spec)
-# -----------------------
 UPDATE_RATE = 5  # Hz (200ms cycle)
 MAX_RANGE = 3.0  # meters (scaled to pixels: 100px = 1m)
 SCALE = 100  # pixels per meter
@@ -54,9 +48,6 @@ ELEVATION_TYPES = {
     "top": {"height": 3, "color": (255, 80, 80), "label": "Top/Head"}
 }
 
-# -----------------------
-# WORLD SETTINGS
-# -----------------------
 WORLD_SIZE = 1000  # pixels (10m x 10m world)
 NUM_OBSTACLES = 20
 
@@ -77,9 +68,6 @@ previous_dist = [[None]*3 for _ in range(3)]
 last_update = time.time()
 timestep = 0
 
-# -----------------------
-# OBSTACLE GENERATION
-# -----------------------
 def generate_obstacles():
     global obstacles
     obstacles = []
@@ -112,10 +100,6 @@ def generate_obstacles():
         })
 
 generate_obstacles()
-
-# -----------------------
-# DRAWING FUNCTIONS
-# -----------------------
 def draw_top_down_view():
     """Draw the top-down world view on the left side"""
     # Calculate camera offset to center on player
@@ -256,10 +240,6 @@ def update_obstacles():
                 obs["vx"] *= -1
             if obs["y"] < 50 or obs["y"] > WORLD_SIZE - 50:
                 obs["vy"] *= -1
-
-# -----------------------
-# MAIN GAME LOOP
-# -----------------------
 running = True
 while running:
     for event in pygame.event.get():
