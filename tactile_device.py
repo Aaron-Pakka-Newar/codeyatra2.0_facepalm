@@ -2,16 +2,6 @@ import pygame
 import random
 import math
 import time
-import numpy as np
-import atexit
-
-# Try to import pyrealsense2, fallback to simulation if not available
-try:
-    import pyrealsense2 as rs
-    REALSENSE_AVAILABLE = True
-except ImportError:
-    REALSENSE_AVAILABLE = False
-    print("Warning: pyrealsense2 not installed. Running in simulation mode.")
 
 # Initialize pygame
 pygame.init()
@@ -127,275 +117,6 @@ previous_dist = [[None]*3 for _ in range(3)]
 last_update = time.time()
 timestep = 0
 
-# -----------------------
-# REALSENSE DEPTH CAMERA HANDLER
-# -----------------------
-class RealSenseHandler:
-    """Handles Intel RealSense D435 depth camera integration"""
-    
-    def __init__(self):
-        self.pipeline = None
-        self.config = None
-        self.is_active = False
-        self.frame_width = 640
-        self.frame_height = 480
-        self.fps = 30
-        self.fov_horizontal = 120  # degrees
-        self.max_range = 3.0  # meters
-        
-        # Previous depth values for vibration detection
-        self.previous_depth = [[None]*3 for _ in range(3)]
-        
-        # Column boundaries based on FOV angles
-        # Left: -60° to -20°, Center: -20° to +20°, Right: +20° to +60°
-        # Map to pixel columns based on 120° FOV
-        self._calculate_column_boundaries()
-        
-        # Initialize camera if available
-        if REALSENSE_AVAILABLE:
-            self._initialize_pipeline()
-    
-    def _calculate_column_boundaries(self):
-        """Calculate pixel column boundaries for direction zones"""
-        # With 120° FOV centered at 0°:
-        # Left edge: -60°, Right edge: +60°
-        # Left zone: -60° to -20° (pixels 0 to ~1/3)
-        # Center zone: -20° to +20° (pixels ~1/3 to ~2/3)
-        # Right zone: +20° to +60° (pixels ~2/3 to end)
-        
-        # Convert angles to pixel positions
-        # angle = (pixel / width - 0.5) * fov
-        # pixel = (angle / fov + 0.5) * width
-        
-        def angle_to_pixel(angle_deg):
-            # Map angle from [-60, 60] to [0, width]
-            return int((angle_deg / self.fov_horizontal + 0.5) * self.frame_width)
-        
-        self.col_boundaries = [
-            (0, angle_to_pixel(-20)),                          # Left: -60° to -20°
-            (angle_to_pixel(-20), angle_to_pixel(20)),         # Center: -20° to +20°
-            (angle_to_pixel(20), self.frame_width)             # Right: +20° to +60°
-        ]
-    
-    def _initialize_pipeline(self):
-        """Initialize RealSense pipeline with depth stream"""
-        try:
-            self.pipeline = rs.pipeline()
-            self.config = rs.config()
-            
-            # Enable depth stream at 640x480, 30fps
-            self.config.enable_stream(
-                rs.stream.depth,
-                self.frame_width,
-                self.frame_height,
-                rs.format.z16,
-                self.fps
-            )
-            
-            # Start pipeline
-            self.pipeline.start(self.config)
-            self.is_active = True
-            print(f"RealSense D435 initialized: {self.frame_width}x{self.frame_height} @ {self.fps}fps")
-            
-            # Register cleanup function
-            atexit.register(self.shutdown)
-            
-        except Exception as e:
-            print(f"Failed to initialize RealSense camera: {e}")
-            print("Falling back to simulation mode.")
-            self.is_active = False
-            self.pipeline = None
-    
-    def get_depth_frame(self):
-        """Get current depth frame as numpy array"""
-        if not self.is_active or self.pipeline is None:
-            return None
-        
-        try:
-            # Wait for frames with timeout
-            frames = self.pipeline.wait_for_frames(timeout_ms=100)
-            depth_frame = frames.get_depth_frame()
-            
-            if not depth_frame:
-                return None
-            
-            # Convert to numpy array for fast processing
-            depth_array = np.asanyarray(depth_frame.get_data())
-            return depth_frame, depth_array
-            
-        except Exception as e:
-            print(f"Error getting depth frame: {e}")
-            return None
-    
-    def compute_tactile_grid_from_depth(self):
-        """
-        Process depth frame and return 3x3 tactile grid.
-        
-        Returns:
-            heights[3][3]: Height values (0-3) based on closest depth
-            vibration[3][3]: Vibration state based on depth change rate
-        """
-        heights = [[0.0] * 3 for _ in range(3)]
-        vibration = [["static"] * 3 for _ in range(3)]
-        
-        frame_data = self.get_depth_frame()
-        if frame_data is None:
-            return heights, vibration, None
-        
-        depth_frame, depth_array = frame_data
-        
-        # Convert depth array from mm to meters (divide by 1000 for z16 format)
-        # Actually RealSense z16 is already in depth units, use get_distance for accurate reading
-        
-        # Process each cell in the 3x3 grid
-        for col in range(3):  # Columns: Left, Center, Right
-            col_start, col_end = self.col_boundaries[col]
-            
-            for row in range(3):  # Rows: 0-1m, 1-2m, 2-3m
-                # Get minimum valid depth in this column region
-                min_depth = self._get_min_depth_in_region(
-                    depth_frame, depth_array, col_start, col_end, row
-                )
-                
-                if min_depth is not None and min_depth > 0:
-                    # Convert depth to height value
-                    height = self._depth_to_height(min_depth)
-                    heights[row][col] = height
-                    
-                    # Calculate vibration based on depth change
-                    vib = self._calculate_vibration(row, col, min_depth)
-                    vibration[row][col] = vib
-                    
-                    # Update previous depth for next frame
-                    self.previous_depth[row][col] = min_depth
-                else:
-                    self.previous_depth[row][col] = None
-        
-        return heights, vibration, None
-    
-    def _get_min_depth_in_region(self, depth_frame, depth_array, col_start, col_end, row):
-        """
-        Get minimum valid depth value in a column region for a specific distance row.
-        
-        Uses numpy for fast region slicing and ignores zero-depth values.
-        """
-        # Extract column region
-        region = depth_array[:, col_start:col_end]
-        
-        # Sample points across the region for efficiency (every 4th pixel)
-        sample_step = 4
-        sampled_region = region[::sample_step, ::sample_step]
-        
-        # Get valid depths (non-zero) and convert to meters
-        # Use depth_frame.get_distance() for accurate depth values
-        valid_depths = []
-        
-        # Sample specific points across the region
-        num_samples_x = max(1, (col_end - col_start) // 8)
-        num_samples_y = self.frame_height // 8
-        
-        for sy in range(num_samples_y):
-            y = sy * 8
-            if y >= self.frame_height:
-                continue
-                
-            for sx in range(num_samples_x):
-                x = col_start + sx * 8
-                if x >= col_end or x >= self.frame_width:
-                    continue
-                
-                # Get accurate depth using get_distance
-                depth_m = depth_frame.get_distance(x, y)
-                
-                # Skip zero/invalid depths
-                if depth_m <= 0 or depth_m > self.max_range:
-                    continue
-                
-                # Check if depth falls in the current row's distance range
-                if row == 0 and depth_m < 1.0:  # Immediate: 0-1m
-                    valid_depths.append(depth_m)
-                elif row == 1 and 1.0 <= depth_m < 2.0:  # Near: 1-2m
-                    valid_depths.append(depth_m)
-                elif row == 2 and 2.0 <= depth_m < 3.0:  # Far: 2-3m
-                    valid_depths.append(depth_m)
-        
-        if valid_depths:
-            return min(valid_depths)
-        return None
-    
-    def _depth_to_height(self, depth_m):
-        """
-        Convert depth distance to tactile height value.
-        
-        <1m = high elevation (3)
-        1-2m = medium elevation (2)
-        2-3m = low elevation (1)
-        >3m = 0
-        """
-        if depth_m < 1.0:
-            return 3  # High elevation - immediate danger
-        elif depth_m < 2.0:
-            return 2  # Medium elevation - near obstacle
-        elif depth_m < 3.0:
-            return 1  # Low elevation - far obstacle
-        else:
-            return 0  # No obstacle in range
-    
-    def _calculate_vibration(self, row, col, current_depth):
-        """
-        Calculate vibration intensity based on depth change rate.
-        
-        Returns: 'static', 'slow', or 'fast'
-        """
-        prev_depth = self.previous_depth[row][col]
-        
-        if prev_depth is None:
-            return "static"
-        
-        # Calculate depth change rate (m/s at 30fps ~ 0.033s per frame)
-        delta_time = 1.0 / self.fps
-        velocity = abs(current_depth - prev_depth) / delta_time
-        
-        if velocity > 0.8:  # Fast approaching (> 0.8 m/s)
-            return "fast"
-        elif velocity > 0.2:  # Slow movement (> 0.2 m/s)
-            return "slow"
-        else:
-            return "static"
-    
-    def shutdown(self):
-        """Safely shutdown RealSense pipeline"""
-        if self.pipeline is not None and self.is_active:
-            try:
-                self.pipeline.stop()
-                print("RealSense pipeline stopped successfully.")
-            except Exception as e:
-                print(f"Error stopping RealSense pipeline: {e}")
-            finally:
-                self.is_active = False
-                self.pipeline = None
-
-# Global RealSense handler instance
-realsense_handler = None
-
-def initialize_realsense():
-    """Initialize the RealSense handler (call once at startup)"""
-    global realsense_handler
-    if REALSENSE_AVAILABLE:
-        realsense_handler = RealSenseHandler()
-        return realsense_handler.is_active
-    return False
-
-def shutdown_realsense():
-    """Shutdown RealSense handler safely"""
-    global realsense_handler
-    if realsense_handler is not None:
-        realsense_handler.shutdown()
-        realsense_handler = None
-
-# Mode flag: True = use RealSense if available, False = simulation only
-USE_REALSENSE = True
-
 
 # OBSTACLE GENERATION
 
@@ -474,45 +195,7 @@ def get_elevation_height(elev_type):
 # GRID COMPUTATION (Core Algorithm)
 # -----------------------
 def compute_tactile_grid():
-    """
-    Compute 3x3 tactile grid from either RealSense depth data or simulated obstacles.
     
-    If RealSense is active and USE_REALSENSE is True, uses real depth sensing.
-    Otherwise falls back to simulation mode with generated obstacles.
-    
-    Returns:
-        heights[3][3]: Height values for each grid cell
-        vibration[3][3]: Vibration state ('static', 'slow', 'fast')
-        cell_obstacles[3][3]: Obstacle info (simulation mode only)
-    """
-    global previous_dist, timestep
-    
-    # Try RealSense first if available and enabled
-    if USE_REALSENSE and realsense_handler is not None and realsense_handler.is_active:
-        heights, vibration, _ = realsense_handler.compute_tactile_grid_from_depth()
-        
-        # Apply distance attenuation weights to match simulation behavior
-        for r in range(3):
-            weight = DISTANCE_LAYERS[r]["weight"]
-            for c in range(3):
-                if heights[r][c] > 0:
-                    heights[r][c] = heights[r][c] * weight
-        
-        # Priority suppression: If Row 0 has level 3 obstacle, suppress Row 2
-        for c in range(3):
-            if heights[0][c] >= 3 * DISTANCE_LAYERS[0]["weight"]:
-                heights[2][c] *= 0.3  # Suppress far
-                heights[1][c] *= 0.7  # Reduce near
-        
-        timestep += 1
-        # Return None for cell_obstacles since we don't have obstacle objects in RealSense mode
-        return heights, vibration, [[None]*3 for _ in range(3)]
-    
-    # Fallback: Simulation mode using generated obstacles
-    return compute_tactile_grid_simulation()
-
-def compute_tactile_grid_simulation():
-    """Original simulation-based tactile grid computation"""
     global previous_dist, timestep
     
     # Grid state: height and vibration per cell
@@ -852,184 +535,6 @@ def draw_3d_obstacle(sx, sy, elevation, size):
     pygame.draw.rect(screen, (255, 255, 255), (sx - cube_w//2, sy - cube_h, cube_w, cube_h), 1)
 
 # -----------------------
-# SIMULATED REALSENSE DEPTH CAMERA VIEW
-# -----------------------
-def draw_simulated_depth_camera(center_x, top_y):
-    """
-    Draw a simulated RealSense depth camera feed showing what the depth sensor would see.
-    Color-codes obstacles by distance (like real depth camera visualization).
-    """
-    # Depth camera view dimensions
-    cam_width = max(120, scale_px(160))
-    cam_height = max(90, scale_px(120))
-    
-    cam_x = center_x - cam_width // 2
-    cam_y = top_y
-    
-    # Background (dark, like depth camera feed)
-    pygame.draw.rect(screen, (10, 10, 15), (cam_x, cam_y, cam_width, cam_height))
-    
-    # Camera frame border
-    pygame.draw.rect(screen, (0, 100, 200), (cam_x, cam_y, cam_width, cam_height), max(1, scale_px(2)))
-    
-    # Header bar
-    header_h = scale_px(16)
-    pygame.draw.rect(screen, (0, 60, 120), (cam_x, cam_y, cam_width, header_h))
-    cam_label = info_font.render("RealSense D435 (Sim)", True, (100, 200, 255))
-    screen.blit(cam_label, (cam_x + scale_px(4), cam_y + scale_px(1)))
-    
-    # View area (below header)
-    view_x = cam_x
-    view_y = cam_y + header_h
-    view_w = cam_width
-    view_h = cam_height - header_h
-    
-    # Draw 3x3 grid overlay for tactile mapping zones
-    cell_w = view_w // 3
-    cell_h = view_h // 3
-    
-    # Calculate depth for each grid cell based on simulated obstacles
-    cos_a = math.cos(player_angle)
-    sin_a = math.sin(player_angle)
-    
-    # Collect depths for each cell
-    cell_depths = [[float('inf')] * 3 for _ in range(3)]  # [row][col]
-    
-    for obs in obstacles:
-        dx = obs["x"] - player_x
-        dy = obs["y"] - player_y
-        
-        # Transform to camera space
-        forward = (dx * cos_a + dy * sin_a) / SCALE  # meters
-        right = (-dx * sin_a + dy * cos_a) / SCALE   # meters
-        
-        if forward <= 0.1 or forward > MAX_RANGE:
-            continue
-        
-        # Calculate angle in camera view
-        angle_rad = math.atan2(right, forward)
-        angle_deg = math.degrees(angle_rad)
-        
-        # Check if in 120° FOV
-        if abs(angle_deg) > 60:
-            continue
-        
-        # Determine column (direction)
-        if angle_deg < -20:
-            col = 0  # Left
-        elif angle_deg < 20:
-            col = 1  # Center
-        else:
-            col = 2  # Right
-        
-        # Determine row (distance)
-        if forward < 1.0:
-            row = 0  # Immediate
-        elif forward < 2.0:
-            row = 1  # Near
-        else:
-            row = 2  # Far
-        
-        # Track minimum depth per cell
-        if forward < cell_depths[row][col]:
-            cell_depths[row][col] = forward
-    
-    # Draw depth visualization for each cell
-    # Color mapping: Red (close) -> Yellow (medium) -> Green (far) -> Blue (beyond)
-    def depth_to_color(depth):
-        if depth == float('inf'):
-            return (15, 15, 30)  # No obstacle - dark
-        elif depth < 1.0:
-            # Red zone (immediate danger)
-            intensity = int(255 * (1.0 - depth))
-            return (200 + intensity // 5, 50, 50)
-        elif depth < 2.0:
-            # Yellow zone (near)
-            t = (depth - 1.0)
-            return (220, int(150 + 50 * t), 50)
-        elif depth < 3.0:
-            # Green zone (far)
-            t = (depth - 2.0)
-            return (50, int(180 - 30 * t), 80)
-        else:
-            return (30, 50, 100)  # Beyond range - blue
-    
-    # Draw cells with depth coloring (rows: top=far, bottom=immediate for depth view)
-    # Note: In depth camera view, near objects appear at bottom, far at top
-    for row in range(3):
-        for col in range(3):
-            # Map row: 0 (immediate) -> bottom, 2 (far) -> top in camera view
-            draw_row = 2 - row
-            cx = view_x + col * cell_w
-            cy = view_y + draw_row * cell_h
-            
-            depth = cell_depths[row][col]
-            color = depth_to_color(depth)
-            
-            # Draw cell background
-            pygame.draw.rect(screen, color, (cx + 1, cy + 1, cell_w - 2, cell_h - 2))
-            
-            # Draw depth value if obstacle present
-            if depth != float('inf'):
-                depth_str = f"{depth:.1f}m"
-                depth_text = info_font.render(depth_str, True, (255, 255, 255))
-                text_x = cx + cell_w // 2 - depth_text.get_width() // 2
-                text_y = cy + cell_h // 2 - depth_text.get_height() // 2
-                
-                # Text shadow for readability
-                shadow = info_font.render(depth_str, True, (0, 0, 0))
-                screen.blit(shadow, (text_x + 1, text_y + 1))
-                screen.blit(depth_text, (text_x, text_y))
-    
-    # Draw grid lines
-    grid_color = (0, 150, 255)
-    for i in range(1, 3):
-        # Vertical lines
-        pygame.draw.line(screen, grid_color, 
-                         (view_x + i * cell_w, view_y), 
-                         (view_x + i * cell_w, view_y + view_h), 1)
-        # Horizontal lines
-        pygame.draw.line(screen, grid_color,
-                         (view_x, view_y + i * cell_h),
-                         (view_x + view_w, view_y + i * cell_h), 1)
-    
-    # Direction labels at bottom
-    dir_labels = ["L", "C", "R"]
-    for i, label in enumerate(dir_labels):
-        lbl = info_font.render(label, True, (100, 200, 255))
-        lbl_x = view_x + i * cell_w + cell_w // 2 - lbl.get_width() // 2
-        screen.blit(lbl, (lbl_x, view_y + view_h + scale_px(2)))
-    
-    # Distance labels on right side
-    dist_labels = ["FAR", "NEAR", "IMM"]
-    for i, label in enumerate(dist_labels):
-        lbl = info_font.render(label, True, (100, 200, 255))
-        lbl_y = view_y + i * cell_h + cell_h // 2 - lbl.get_height() // 2
-        screen.blit(lbl, (view_x + view_w + scale_px(3), lbl_y))
-    
-    # Status indicator
-    status_y = cam_y + cam_height + scale_px(2)
-    if USE_REALSENSE and realsense_handler and realsense_handler.is_active:
-        status_text = info_font.render("LIVE", True, (50, 255, 50))
-    else:
-        status_text = info_font.render("SIMULATED", True, (255, 200, 50))
-    screen.blit(status_text, (center_x - status_text.get_width() // 2, status_y))
-    
-    # Depth color legend (compact)
-    legend_y = status_y + scale_px(14)
-    legend_items = [
-        ((220, 50, 50), "<1m"),
-        ((220, 180, 50), "1-2m"),
-        ((50, 180, 80), "2-3m"),
-    ]
-    legend_x = cam_x
-    for color, text in legend_items:
-        pygame.draw.rect(screen, color, (legend_x, legend_y, scale_px(12), scale_px(10)))
-        lbl = info_font.render(text, True, (180, 180, 180))
-        screen.blit(lbl, (legend_x + scale_px(14), legend_y - scale_px(1)))
-        legend_x += scale_px(48)
-
-# -----------------------
 # FIRST-PERSON PERSPECTIVE VIEW (Blind Navigation)
 # -----------------------
 def draw_first_person_view():
@@ -1311,9 +816,6 @@ def draw_first_person_view():
     # Minimap label
     mm_label = info_font.render("Minimap", True, (100, 200, 255))
     screen.blit(mm_label, (minimap_x - mm_label.get_width() // 2, minimap_y + minimap_radius + scale_px(4)))
-    
-    # --- Simulated RealSense Depth Camera View ---
-    draw_simulated_depth_camera(minimap_x, minimap_y + minimap_radius + scale_px(30))
     
     # --- Title ---
     title = title_font.render("Player View (Blind Navigation)", True, (200, 200, 200))
@@ -1669,37 +1171,18 @@ def draw_tactile_device(heights, vibration, cell_obstacles):
 # MAIN LOOP
 # -----------------------
 def main():
-    global player_x, player_y, player_angle, last_update, USE_REALSENSE
+    global player_x, player_y, player_angle, last_update
     
     running = True
-    
-    # Initialize RealSense camera
-    realsense_active = initialize_realsense()
     
     print("=" * 60)
     print("Directional Tactile Navigation Device Simulation")
     print("3×3 Tactile Grid Model")
     print("=" * 60)
-    
-    # Print mode status
-    if realsense_active and USE_REALSENSE:
-        print("\n*** REALSENSE MODE ACTIVE ***")
-        print("Using Intel RealSense D435 depth camera for real-time sensing")
-        print("Depth stream: 640x480 @ 30fps")
-        print("FOV: 120° | Range: 0-3m")
-    else:
-        print("\n*** SIMULATION MODE ***")
-        if not REALSENSE_AVAILABLE:
-            print("(pyrealsense2 not installed)")
-        elif not realsense_active:
-            print("(RealSense camera not detected)")
-        print("Using simulated obstacles")
-    
     print("\nControls:")
     print("  W/S - Move forward/backward")
     print("  A/D - Rotate left/right")
     print("  R   - Reset obstacles")
-    print("  T   - Toggle RealSense/Simulation mode")
     print("  ESC - Quit")
     print("\nTactile Encoding:")
     print("  Green  = Step (can step over)")
@@ -1707,17 +1190,16 @@ def main():
     print("  Red    = Top (avoid - head level)")
     print("  Purple = Pothole (drop below surface)")
     print("  Vibration = Moving obstacle")
-    print("\nDepth-to-Height Mapping (RealSense mode):")
-    print("  <1m  = Height 3 (immediate danger)")
-    print("  1-2m = Height 2 (near obstacle)")
-    print("  2-3m = Height 1 (far obstacle)")
-    print("  >3m  = Height 0 (clear)")
     print("=" * 60)
     
-    try:
-        while running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.VIDEORESIZE:
+                handle_resize(event.w, event.h)
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
                     running = False
                 elif event.key == pygame.K_r:
                     generate_obstacles()
@@ -1764,67 +1246,6 @@ def main():
         clock.tick(60)
     
     pygame.quit()
-                elif event.type == pygame.VIDEORESIZE:
-                    handle_resize(event.w, event.h)
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        running = False
-                    elif event.key == pygame.K_r:
-                        generate_obstacles()
-                        print("Obstacles reset!")
-                    elif event.key == pygame.K_t:
-                        # Toggle RealSense/Simulation mode
-                        if realsense_active:
-                            USE_REALSENSE = not USE_REALSENSE
-                            mode = "RealSense" if USE_REALSENSE else "Simulation"
-                            print(f"Switched to {mode} mode")
-                        else:
-                            print("RealSense not available - staying in simulation mode")
-            
-            # Input handling
-            pressed = pygame.key.get_pressed()
-            
-            # WASD and Arrow keys (only move in simulation mode)
-            if not (USE_REALSENSE and realsense_active):
-                if pressed[pygame.K_w] or pressed[pygame.K_UP]:
-                    new_x = player_x + math.cos(player_angle) * speed
-                    new_y = player_y + math.sin(player_angle) * speed
-                    if 50 < new_x < WORLD_SIZE - 50 and 50 < new_y < WORLD_SIZE - 50:
-                        player_x = new_x
-                        player_y = new_y
-                if pressed[pygame.K_s] or pressed[pygame.K_DOWN]:
-                    new_x = player_x - math.cos(player_angle) * speed
-                    new_y = player_y - math.sin(player_angle) * speed
-                    if 50 < new_x < WORLD_SIZE - 50 and 50 < new_y < WORLD_SIZE - 50:
-                        player_x = new_x
-                        player_y = new_y
-                if pressed[pygame.K_a] or pressed[pygame.K_LEFT]:
-                    player_angle -= rot_speed
-                if pressed[pygame.K_d] or pressed[pygame.K_RIGHT]:
-                    player_angle += rot_speed
-            
-            # Update at 5 Hz
-            current_time = time.time()
-            if current_time - last_update >= 1.0 / UPDATE_RATE:
-                update_obstacles()
-                last_update = current_time
-            
-            # Compute tactile grid
-            heights, vibration, cell_obstacles = compute_tactile_grid()
-            
-            # Draw
-            screen.fill((0, 0, 0))
-            draw_first_person_view()
-            draw_tactile_device(heights, vibration, cell_obstacles)
-            
-            pygame.display.flip()
-            clock.tick(60)
-    
-    finally:
-        # Safe shutdown - ensure RealSense pipeline is stopped
-        shutdown_realsense()
-        pygame.quit()
-        print("\nApplication closed safely.")
 
 if __name__ == "__main__":
     main()
