@@ -112,7 +112,3 @@ python tactile_device.py
 | Red | Top/Head level (avoid) |
 | Purple | Pothole (drop below surface) |
 | Vibration | Moving obstacle detected |
-
-## License
-
-MIT
