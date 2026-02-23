@@ -620,24 +620,6 @@ def compute_safe_direction(heights):
 # -----------------------
 # UPDATE OBSTACLES
 # -----------------------
-# Player collision radius in pixels
-PLAYER_RADIUS = 15  # ~0.15m
-
-def check_collision(px, py):
-    """Return True if position (px, py) collides with any obstacle."""
-    for obs in obstacles:
-        hw_px = obs["cube_w"] * SCALE  # half-width in pixels
-        hd_px = obs["cube_d"] * SCALE  # half-depth in pixels
-        # Expand obstacle bounds by player radius for circle-vs-AABB collision
-        if (obs["x"] - hw_px - PLAYER_RADIUS < px < obs["x"] + hw_px + PLAYER_RADIUS and
-            obs["y"] - hd_px - PLAYER_RADIUS < py < obs["y"] + hd_px + PLAYER_RADIUS):
-            # Only block on non-pothole, non-step obstacles (step = can step over)
-            elev = obs["elevation"]
-            if elev in ("mid", "top"):  # solid obstacles block movement
-                return True
-    return False
-
-
 def update_obstacles():
     for obs in obstacles:
         if obs["moving"]:
@@ -1719,51 +1701,6 @@ def main():
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
-                elif event.key == pygame.K_r:
-                    generate_obstacles()
-                    print("Obstacles reset!")
-        
-        # Input handling
-        pressed = pygame.key.get_pressed()
-        
-        # WASD and Arrow keys (with collision detection)
-        if pressed[pygame.K_w] or pressed[pygame.K_UP]:
-            new_x = player_x + math.cos(player_angle) * speed
-            new_y = player_y + math.sin(player_angle) * speed
-            if (50 < new_x < WORLD_SIZE - 50 and 50 < new_y < WORLD_SIZE - 50
-                    and not check_collision(new_x, new_y)):
-                player_x = new_x
-                player_y = new_y
-        if pressed[pygame.K_s] or pressed[pygame.K_DOWN]:
-            new_x = player_x - math.cos(player_angle) * speed
-            new_y = player_y - math.sin(player_angle) * speed
-            if (50 < new_x < WORLD_SIZE - 50 and 50 < new_y < WORLD_SIZE - 50
-                    and not check_collision(new_x, new_y)):
-                player_x = new_x
-                player_y = new_y
-        if pressed[pygame.K_a] or pressed[pygame.K_LEFT]:
-            player_angle -= rot_speed
-        if pressed[pygame.K_d] or pressed[pygame.K_RIGHT]:
-            player_angle += rot_speed
-        
-        # Update at 5 Hz
-        current_time = time.time()
-        if current_time - last_update >= 1.0 / UPDATE_RATE:
-            update_obstacles()
-            last_update = current_time
-        
-        # Compute tactile grid
-        heights, vibration, cell_obstacles = compute_tactile_grid()
-        
-        # Draw
-        screen.fill((0, 0, 0))
-        draw_first_person_view()
-        draw_tactile_device(heights, vibration, cell_obstacles)
-        
-        pygame.display.flip()
-        clock.tick(60)
-    
-    pygame.quit()
                 elif event.type == pygame.VIDEORESIZE:
                     handle_resize(event.w, event.h)
                 elif event.type == pygame.KEYDOWN:
