@@ -54,7 +54,7 @@ python tactile_device.py
 | S / ↓ | Move backward |
 | A / ← | Rotate left |
 | D / → | Rotate right |
-| Space bar / → | Jump |
+| Space bar /  | Jump |
 | R | Reset obstacles |
 | ESC | Quit |
 
