@@ -92,19 +92,20 @@ ELEVATION_TYPES = {
     "cliff_pothole": {"height": -3, "color": (180, 30, 30), "label": "Cliff (Danger)"},
     "step": {"height": 1, "color": (100, 200, 100), "label": "Step"},
     "mid": {"height": 2, "color": (220, 180, 60), "label": "Mid"},
-    "top": {"height": 3, "color": (255, 80, 80), "label": "Top/Head"}
+    "top": {"height": 3, "color": (255, 80, 80), "label": "Top/Head"},
+    "wall": {"height": 3.5, "color": (255, 0, 0), "label": "Wall (Above Eye)"}
 }
 
 # -----------------------
 # WORLD SETTINGS
 # -----------------------
-WORLD_SIZE = 1000  # pixels (10m x 10m world)
+WORLD_SIZE = 1500  # pixels (15m x 15m world) - INCREASED for larger border area
 NUM_OBSTACLES = 14  # Reduced for more walking room
 MIN_OBSTACLE_SPACING = 60  # Minimum pixels between obstacle centres
 WALL_BOUNDARY = 50         # Wall outer edge in pixels
 WALL_THICKNESS_PX = 30     # Wall thickness in pixels
 WALL_INNER = WALL_BOUNDARY + WALL_THICKNESS_PX  # Inner edge of walls
-WALL_HEIGHT_M = 3.5        # Wall height in metres (taller than top/red obstacles)
+WALL_HEIGHT_M = 3.5        # Wall height in metres (taller than top/red obstacles - ABOVE EYE LEVEL)
 
 player_x = WORLD_SIZE // 2
 player_y = WORLD_SIZE // 2
@@ -220,7 +221,54 @@ def get_distance_meters(dist_pixels):
     return dist_pixels / SCALE
 
 def get_elevation_height(elev_type):
+    if elev_type == "wall":
+        return WALL_HEIGHT_M  # 3.5m - above eye level, appears RED
     return ELEVATION_TYPES.get(elev_type, ELEVATION_TYPES["ground"])["height"]
+
+def check_wall_in_grid_cell(row, col):
+    """Check if a wall intersects with the given tactile grid cell.
+    Returns wall info dict if detected, None otherwise."""
+    
+    # Row 0: 0-1m, Row 1: 1-2m, Row 2: 2-3m
+    # Col 0: -60° to -20°, Col 1: -20° to 20°, Col 2: 20° to 60°
+    
+    min_dist = row  # 0, 1, or 2 meters
+    max_dist = row + 1  # 1, 2, or 3 meters
+    
+    min_dist_px = min_dist * SCALE
+    max_dist_px = max_dist * SCALE
+    
+    if col == 0:
+        min_angle, max_angle = -60, -20
+    elif col == 1:
+        min_angle, max_angle = -20, 20
+    else:
+        min_angle, max_angle = 20, 60
+    
+    num_samples = 8
+    for i in range(num_samples):
+        sample_dist = min_dist_px + (max_dist_px - min_dist_px) * i / (num_samples - 1)
+        
+        for j in range(3):
+            sample_angle_deg = min_angle + (max_angle - min_angle) * j / 2
+            sample_angle_rad = math.radians(sample_angle_deg)
+            
+            world_angle = player_angle + sample_angle_rad
+            sample_x = player_x + sample_dist * math.cos(world_angle)
+            sample_y = player_y + sample_dist * math.sin(world_angle)
+            
+            if (sample_x <= WALL_INNER or sample_x >= WORLD_SIZE - WALL_INNER or
+                sample_y <= WALL_INNER or sample_y >= WORLD_SIZE - WALL_INNER):
+                
+                wall_dist_m = sample_dist / SCALE
+                if wall_dist_m <= MAX_RANGE:
+                    return {
+                        "distance": wall_dist_m,
+                        "x": sample_x,
+                        "y": sample_y
+                    }
+    
+    return None
 
 # -----------------------
 # GRID COMPUTATION (Core Algorithm)
@@ -234,8 +282,28 @@ def compute_tactile_grid():
     vibration = [["static"] * 3 for _ in range(3)]
     cell_obstacles = [[None] * 3 for _ in range(3)]  # Store obstacle info
     
+    # First check for walls in each grid cell
     for r in range(3):
         for c in range(3):
+            wall_detected = check_wall_in_grid_cell(r, c)
+            if wall_detected:
+                wall_dist = wall_detected["distance"]
+                wall_height = 3.5  # Above eye level - will appear RED
+                weight = DISTANCE_LAYERS[r]["weight"]
+                heights[r][c] = wall_height * weight
+                cell_obstacles[r][c] = {
+                    "elevation": "wall",
+                    "distance": wall_dist,
+                    "x": wall_detected["x"],
+                    "y": wall_detected["y"]
+                }
+    
+    # Then check for regular obstacles (only if no wall already detected)
+    for r in range(3):
+        for c in range(3):
+            if cell_obstacles[r][c] is not None:
+                continue
+                
             best_dist = None
             best_obstacle = None
             
